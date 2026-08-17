@@ -86,7 +86,7 @@ test('client uses the plugin endpoint instead of the rc.6 allowlisted settings A
 
 test('package manifest publishes and injects the client bundle', async () => {
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
-  assert.equal(manifest.version, '0.3.1')
+  assert.equal(manifest.version, '0.3.2')
   assert.equal(manifest.exports['./client'], './lib/client.js')
   assert.equal(manifest.dsh.client.platform, 'web')
   assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-settings'))

@@ -264,6 +264,9 @@ test('registers settings, setup skill, catalog, and configured model tool', asyn
   assert.equal(state.skills[0].name, 'model-subagent-setup')
   assert.match(state.skills[0].content, /Call `model_subagent_catalog`/)
   assert.match(state.skills[0].content, /configure_subagent_models/)
+  assert.match(state.skills[0].content, /reliable general knowledge/)
+  assert.match(state.skills[0].content, /one multi-select question per ambiguous model/)
+  assert.match(state.skills[0].content, /when selecting the Luna route/)
 
   const catalog = state.registeredTools.get(CATALOG_TOOL_NAME)
   const configuration = state.registeredTools.get(CONFIG_TOOL_NAME)
