@@ -1,11 +1,12 @@
 {
   "name": "dsh-subagent-dynamic-model",
-  "version": "0.1.0",
+  "version": "0.3.1",
   "description": "Model-selectable subagents and guided model routing setup for DeepSeek Harness",
   "type": "module",
   "main": "./lib/index.js",
   "exports": {
     ".": "./lib/index.js",
+    "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
@@ -20,10 +21,20 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-api-remotes"
+      ],
+      "platform": "web"
     }
   },
   "scripts": {
-    "test": "node --check lib/index.js && node --check lib/model-catalog.js && node --test"
+    "test": "node --check lib/index.js && node --check lib/model-catalog.js && node --check lib/client.js && node --test"
   },
   "keywords": [
     "dsh",

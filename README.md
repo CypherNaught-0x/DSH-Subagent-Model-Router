@@ -4,19 +4,23 @@ A DeepSeek Harness Cordis plugin for delegating subagent work to a configured mo
 
 ## What it adds
 
-- `subagent_model`: one delegation tool whose `model` argument is restricted to configured aliases.
-- Per-model `tags` and routing `description` text embedded in both the tool schema and the system prompt.
-- `model_subagent_catalog`: a read-only tool that lists models advertised by the Harness's currently registered LLM providers.
-- `model-subagent-setup`: a setup skill that guides model selection, generates safe routing descriptions, edits the profile patch, and validates the result.
+- `subagent_model`: a delegation tool whose `model` argument is restricted to user-configured aliases.
+- Per-model tags and routing descriptions embedded in the tool schema and system prompt.
+- `model_subagent_catalog`: a read-only view of models advertised by registered LLM providers.
+- `configure_subagent_models`: a namespace-scoped model-facing tool for reading or updating this plugin's settings without filesystem access.
+- `model-subagent-setup`: a guided skill for selecting routes, generating routing guidance, obtaining confirmation, and saving through the constrained configuration tool.
+- **Settings → Subagent Models**: a Web settings page for manually adding, editing, and removing routes.
+- A hot-reloaded `subagent-dynamic-model` namespace in `~/.dsh/settings.yaml`.
 - Foreground execution and durable continuable background subagents.
 
-With an empty `models` list, only the catalog tool and setup skill are registered. This provides a bootstrap state: install first, then invoke `/model-subagent-setup`.
+With an empty `models` list, only the catalog tool, settings page, and setup skill are registered. This provides a bootstrap state for initial setup.
 
 ## Requirements
 
 - DeepSeek Harness `0.1.0-rc.6` or compatible
-- A preset that exposes the normal skill loader/tool
-- The Host `spawn` subagent provider (included by standard DSH profiles)
+- The Web profile for the settings page
+- A preset exposing the normal skill loader/tool
+- The Host `spawn` subagent provider, included by standard DSH profiles
 
 ## Install
 
@@ -28,74 +32,97 @@ dsh plugin --profile web add dsh-subagent-dynamic-model
 dsh plugin --profile web add ./dsh-subagent-dynamic-model
 ```
 
-If the earlier `cordis-plugin-development` package is already installed, remove it before adding the renamed package so both bundles do not register the same tools:
+If `cordis-plugin-development` is still installed, remove it first:
 
 ```sh
 dsh plugin --profile web remove cordis-plugin-development
 dsh plugin --profile web add ./dsh-subagent-dynamic-model
 ```
 
-Restart the profile after first installation. Then invoke:
+Restart `dsh web` after installation and refresh the page. Open **Settings → Subagent Models**, or invoke:
 
 ```text
 /model-subagent-setup
 ```
 
-The skill calls `model_subagent_catalog`, asks which routes to expose, proposes aliases/tags/descriptions, and adds an id-targeted entry to the selected profile's `cordis.patch.yml`.
+## Configure through the Web UI
 
-## Manual configuration
+The **Subagent Models** settings page provides controls for:
 
-Add this to `~/.dsh/profiles/web/cordis.patch.yml` (preserving other entries):
+- model alias, display name, LLM provider route, and exact model id;
+- comma-separated routing tags and the “when to use” description;
+- optional per-model output-token caps;
+- subagent backend, tool name, delegation depth, and background execution.
+
+On DSH rc.6, the built-in Web settings API exposes only a fixed namespace allowlist. This plugin therefore uses a package-owned, same-origin Host endpoint backed by the same Settings service, schema validation, persistence, and revision conflict protection. Successful changes apply live: the old delegation tool is removed and the updated schema and prompt guidance are registered immediately.
+
+The endpoint rejects non-loopback connections and cross-origin mutations, so the page is unavailable from a non-local browser connection.
+
+## Configure through the model-facing tool
+
+`configure_subagent_models` is the preferred path for agent-assisted setup:
+
+- `action: "get"` reads the current normalized settings.
+- `action: "update"` replaces the complete model list and optionally changes the backend, delegation tool name, depth, or background policy.
+- The tool calls the Settings service directly and can modify only `subagent-dynamic-model`; it accepts no filesystem path and cannot read or write other namespaces.
+- Updates pass the same schema and provider-capability validation as the Web UI, persist to `settings.yaml`, and apply live.
+
+The update action is intentionally documented for direct user-requested changes only. The setup skill must show the complete proposed list and receive explicit confirmation before calling it.
+
+## Configure through `settings.yaml`
+
+Merge the following namespace into `~/.dsh/settings.yaml`:
 
 ```yaml
-- id: dsh-subagent-dynamic-model
-  config:
-    subagentProvider: spawn
-    toolName: subagent_model
-    maxDepth: 3
-    enableRunInBackground: true
-    models:
-      - alias: fast
-        provider: acme
-        model: acme-fast
-        displayName: Acme Fast
-        tags: [fast, routine]
-        description: Use for quick, well-scoped tasks where low latency matters.
-      - alias: deep
-        provider: acme
-        model: acme-reasoner
-        displayName: Acme Reasoner
-        tags: [reasoning, review]
-        description: Use for difficult analysis, architecture decisions, and adversarial review.
-        maxTokens: 16384
+subagent-dynamic-model:
+  subagentProvider: spawn
+  toolName: subagent_model
+  maxDepth: 3
+  enableRunInBackground: true
+  models:
+    - alias: fast
+      provider: acme
+      model: acme-fast
+      displayName: Acme Fast
+      tags: [fast, routine]
+      description: Use for quick, well-scoped tasks where low latency matters.
+    - alias: deep
+      provider: acme
+      model: acme-reasoner
+      displayName: Acme Reasoner
+      tags: [reasoning, review]
+      description: Use for difficult analysis, architecture decisions, and adversarial review.
+      maxTokens: 16384
 ```
 
-Validate without booting:
+See `examples/settings.yaml` for a copyable document fragment. The settings file is watched; valid edits apply without changing a Cordis patch.
 
-```sh
-dsh --profile web --dump-config
-```
-
-Profile patches replace a row's entire `config`; restate every plugin field you want to preserve.
-
-### Configuration reference
+### Settings reference
 
 | Field | Default | Purpose |
 | --- | --- | --- |
-| `models` | `[]` | Routes exposed to the AI agent. An empty list leaves setup/catalog only. |
+| `models` | `[]` | Routes exposed to AI agents. An empty list leaves setup/catalog only. |
 | `models[].alias` | required | Stable selector shown in the tool's `model` enum. |
 | `models[].provider` | required | Exact registered LLM provider route. |
 | `models[].model` | required | Exact model id interpreted by that provider. |
 | `models[].displayName` | alias | Human-readable label in routing guidance. |
 | `models[].tags` | `[]` | Lowercase kebab-case routing tags. |
-| `models[].description` | required | One-sentence guidance describing when to use this route. |
-| `models[].maxTokens` | provider default | Optional output cap for the initially created or still-resident child. DSH rc.6 does not restore this override after a continuable child is cold-resumed. |
+| `models[].description` | required | One sentence describing when to use this route. |
+| `models[].maxTokens` | provider default | Optional cap for an initially created or resident child. DSH rc.6 does not restore it after a continuable child is cold-resumed. |
 | `subagentProvider` | `spawn` | Subagent execution backend, not the LLM provider. |
-| `toolName` | `subagent_model` | Name of the model-facing delegation tool. |
+| `toolName` | `subagent_model` | Model-facing delegation tool name. |
 | `maxDepth` | `3` | Maximum delegation depth enforced by the backend. |
 | `enableRunInBackground` | `true` | Enable durable background children and default to them. |
 
-The live catalog is advisory: some adapters accept model ids they do not advertise. Manually configured ids remain allowed, but should be user-confirmed.
+The live catalog is advisory: some adapters accept model ids they do not advertise. Manually entered ids remain allowed but should be user-confirmed.
+
+## Migrating from 0.1
+
+Version 0.1 stored these values in an id-targeted profile `cordis.patch.yml` entry. For 0.2:
+
+1. Copy that entry's `config` object under `subagent-dynamic-model:` in `~/.dsh/settings.yaml`.
+2. Remove the old `- id: dsh-subagent-dynamic-model` override from the profile patch. The plugin's bundle already mounts the row.
+3. Restart DSH once to load the new Host schema and Client settings page. Future settings changes apply live.
 
 ## Development
 
@@ -110,13 +137,19 @@ Project layout:
 dsh-subagent-dynamic-model/
 ├── lib/
 │   ├── index.js
+│   ├── client.js
 │   └── model-catalog.js
 ├── skills/model-subagent-setup/SKILL.md
-├── examples/cordis.patch.yml
-├── test/plugin.test.js
+├── examples/settings.yaml
+├── test/
+│   ├── client.test.js
+│   ├── model-catalog.test.js
+│   └── plugin.test.js
 ├── cordis.patch.yml
 └── package.json
 ```
+
+The Client bundle is plain `window.__ModuleLoader__.load(...)` JavaScript and requires no build step.
 
 ## License
 

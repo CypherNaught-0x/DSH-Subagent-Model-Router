@@ -1,4 +1,4 @@
-# Model-selectable subagents plus the guided setup skill.
+# Mount only; user configuration lives in settings.yaml.
 - insert:
     - id: dsh-subagent-dynamic-model
       name: dsh-subagent-dynamic-model
