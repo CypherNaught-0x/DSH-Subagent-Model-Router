@@ -1,0 +1,4 @@
+# Model-selectable subagents plus the guided setup skill.
+- insert:
+    - id: dsh-subagent-dynamic-model
+      name: dsh-subagent-dynamic-model
