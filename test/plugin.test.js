@@ -9,7 +9,6 @@ import {
 
 const configuredSettings = {
   subagentProvider: 'spawn',
-  toolName: 'subagent_model',
   maxDepth: 4,
   enableRunInBackground: true,
   models: [{
@@ -25,7 +24,6 @@ const configuredSettings = {
 
 const defaultSettings = {
   subagentProvider: 'spawn',
-  toolName: 'subagent_model',
   maxDepth: 3,
   enableRunInBackground: true,
   models: [],
@@ -273,6 +271,7 @@ test('registers settings, setup skill, catalog, and configured model tool', asyn
   const delegation = state.registeredTools.get('subagent_model')
   assert.ok(catalog)
   assert.ok(configuration)
+  assert.equal(configuration.parameters.properties.tool_name, undefined)
   assert.ok(delegation)
   assert.deepEqual(delegation.parameters.properties.model.enum, ['deep'])
   assert.match(delegation.description, /reasoning, review/)
@@ -373,7 +372,8 @@ test('Web settings route is loopback-only and persists validated revisions', asy
   assert.equal(updated.status, 200)
   assert.equal(updated.body.descriptor.revision, 1)
   assert.equal(updated.body.descriptor.value.models[0].alias, 'fast')
-  assert.ok(state.registeredTools.get('delegate_model'))
+  assert.equal(updated.body.descriptor.value.toolName, undefined)
+  assert.ok(state.registeredTools.get('subagent_model'))
 
   const stale = await callWebRoute(route, {
     method: 'PUT',
@@ -428,17 +428,15 @@ test('configuration tool reads and updates only the plugin settings namespace', 
       tags: ['fast', 'routine'],
       description: 'Use for quick routine work.',
     }],
-    tool_name: 'delegate_model',
     max_depth: 2,
   }, execution())
 
   assert.equal(updated.status, 'updated')
-  assert.equal(updated.settings.toolName, 'delegate_model')
+  assert.equal(updated.settings.toolName, undefined)
   assert.equal(updated.settings.models[0].displayName, 'fast')
   assert.equal(state.settingsReplacements.length, 1)
   assert.deepEqual(state.settingsReplacements[0], updated.settings)
-  assert.equal(state.registeredTools.has('subagent_model'), false)
-  assert.ok(state.registeredTools.get('delegate_model'))
+  assert.ok(state.registeredTools.get('subagent_model'))
   assert.ok(state.registeredTools.get(CONFIG_TOOL_NAME))
 })
 
@@ -470,14 +468,13 @@ test('hot settings changes replace and remove the model-facing tool', async () =
     }],
   })
 
-  assert.equal(state.registeredTools.has('subagent_model'), false)
-  const replacement = state.registeredTools.get('delegate_model')
+  const replacement = state.registeredTools.get('subagent_model')
   assert.ok(replacement)
   assert.deepEqual(replacement.parameters.properties.model.enum, ['fast'])
   assert.match(state.sections[0].text({ scope: {} }), /fast-model/)
 
   state.updateSettings(defaultSettings)
-  assert.equal(state.registeredTools.has('delegate_model'), false)
+  assert.equal(state.registeredTools.has('subagent_model'), false)
   assert.ok(state.registeredTools.get(CATALOG_TOOL_NAME))
   assert.equal(state.sections[0].text({ scope: {} }), '')
 })

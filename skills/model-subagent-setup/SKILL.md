@@ -19,9 +19,9 @@ Use this skill to choose which existing Harness model routes are exposed through
    - a one-sentence `description` beginning with “Use for …” or “Use when …” that names the work to delegate and, where useful, how it differs from the other configured routes.
 7. Reject circular or content-free descriptions. Never write phrases such as “when selecting the Luna route,” “when using this model,” “for broad tasks,” or “for coding tasks” without specific workload criteria. A valid description must help an agent choose between at least two configured routes without relying on their aliases or model names.
 8. Ground factual claims in provider metadata or reliable model knowledge. Do not invent claims about price, speed, context size, privacy, benchmark rank, or modalities. When such a property would affect routing but is uncertain, ask the user instead.
-9. Call `configure_subagent_models` with `action: "get"` to preserve the current backend, tool name, depth, and background defaults unless the user asked to change them.
+9. Call `configure_subagent_models` with `action: "get"` to preserve the current backend, depth, and background defaults unless the user asked to change them.
 10. Present the complete proposed replacement model list and obtain explicit confirmation before writing settings.
-11. After confirmation, call `configure_subagent_models` with `action: "update"` and the complete `models` array. Pass `subagent_provider`, `tool_name`, `max_depth`, or `enable_run_in_background` only when the user approved changing those values. Do not edit `settings.yaml` directly when this tool is available.
+11. After confirmation, call `configure_subagent_models` with `action: "update"` and the complete `models` array. Pass `subagent_provider`, `max_depth`, or `enable_run_in_background` only when the user approved changing those values. Do not edit `settings.yaml` directly when this tool is available.
 12. Settings apply live. Verify that the delegation tool is visible and its `model` enum contains exactly the selected aliases. If the package was newly installed or its Client bundle changed, restart DSH and refresh the page first.
 
 ## Settings shape
@@ -29,7 +29,6 @@ Use this skill to choose which existing Harness model routes are exposed through
 ```yaml
 subagent-dynamic-model:
   subagentProvider: spawn
-  toolName: subagent_model
   maxDepth: 3
   enableRunInBackground: true
   models:

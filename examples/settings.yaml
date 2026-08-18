@@ -1,7 +1,6 @@
 # Merge this namespace into ~/.dsh/settings.yaml. Preserve all other sections.
 subagent-dynamic-model:
   subagentProvider: spawn
-  toolName: subagent_model
   maxDepth: 3
   enableRunInBackground: true
   models:

@@ -52,7 +52,7 @@ The **Subagent Models** settings page provides controls for:
 - model alias, display name, LLM provider route, and exact model id;
 - comma-separated routing tags and the “when to use” description;
 - optional per-model output-token caps;
-- subagent backend, tool name, delegation depth, and background execution.
+- subagent backend, delegation depth, and background execution.
 
 On DSH rc.6, the built-in Web settings API exposes only a fixed namespace allowlist. This plugin therefore uses a package-owned, same-origin Host endpoint backed by the same Settings service, schema validation, persistence, and revision conflict protection. Successful changes apply live: the old delegation tool is removed and the updated schema and prompt guidance are registered immediately.
 
@@ -63,7 +63,7 @@ The endpoint rejects non-loopback connections and cross-origin mutations, so the
 `configure_subagent_models` is the preferred path for agent-assisted setup:
 
 - `action: "get"` reads the current normalized settings.
-- `action: "update"` replaces the complete model list and optionally changes the backend, delegation tool name, depth, or background policy.
+- `action: "update"` replaces the complete model list and optionally changes the backend, depth, or background policy.
 - The tool calls the Settings service directly and can modify only `subagent-dynamic-model`; it accepts no filesystem path and cannot read or write other namespaces.
 - Updates pass the same schema and provider-capability validation as the Web UI, persist to `settings.yaml`, and apply live.
 
@@ -76,7 +76,6 @@ Merge the following namespace into `~/.dsh/settings.yaml`:
 ```yaml
 subagent-dynamic-model:
   subagentProvider: spawn
-  toolName: subagent_model
   maxDepth: 3
   enableRunInBackground: true
   models:
@@ -110,9 +109,10 @@ See `examples/settings.yaml` for a copyable document fragment. The settings file
 | `models[].description` | required | One sentence describing when to use this route. |
 | `models[].maxTokens` | provider default | Optional cap for an initially created or resident child. DSH rc.6 does not restore it after a continuable child is cold-resumed. |
 | `subagentProvider` | `spawn` | Subagent execution backend, not the LLM provider. |
-| `toolName` | `subagent_model` | Model-facing delegation tool name. |
 | `maxDepth` | `3` | Maximum delegation depth enforced by the backend. |
 | `enableRunInBackground` | `true` | Enable durable background children and default to them. |
+
+The delegation tool is always named `subagent_model`. Legacy `toolName` values from versions before 0.4 are ignored and are removed the next time the namespace is saved.
 
 The live catalog is advisory: some adapters accept model ids they do not advertise. Manually entered ids remain allowed but should be user-confirmed.
 

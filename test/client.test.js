@@ -75,19 +75,21 @@ test('client bundle registers a dedicated settings section', async () => {
   const rendered = registration.component()
   assert.equal(rendered.type, 'section')
   assert.equal(rendered.children[0].children[0], 'Subagent Models')
+  assert.equal(rendered.children[4].children[0].children[0], 'Models')
 })
 
 test('client uses the plugin endpoint instead of the rc.6 allowlisted settings API', async () => {
   const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
   assert.match(source, /\/dsh-subagent-dynamic-model\/settings/)
   assert.match(source, /\/model-subagent-setup/)
+  assert.doesNotMatch(source, /label: 'Tool name'/)
   assert.doesNotMatch(source, /api\.settings\.describe/)
   assert.doesNotMatch(source, /api\.settings\.update/)
 })
 
 test('package manifest publishes and injects the client bundle', async () => {
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
-  assert.equal(manifest.version, '0.3.3')
+  assert.equal(manifest.version, '0.4.0')
   assert.equal(manifest.exports['./client'], './lib/client.js')
   assert.equal(manifest.dsh.client.platform, 'web')
   assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-settings'))
