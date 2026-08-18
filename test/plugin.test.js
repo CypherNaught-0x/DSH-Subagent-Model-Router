@@ -5,6 +5,7 @@ import {
   CATALOG_TOOL_NAME,
   CONFIG_TOOL_NAME,
   SETTINGS_NAMESPACE,
+  subagentModelRouteProjectionDefinition,
 } from '../lib/index.js'
 
 const configuredSettings = {
@@ -37,6 +38,7 @@ function createContext(options = {}) {
   const starts = []
   const continuableStarts = []
   const effects = []
+  const projectionDefinitions = []
   const settingsReplacements = []
   let disposed = false
   let settingsValue = options.settings ?? configuredSettings
@@ -113,6 +115,15 @@ function createContext(options = {}) {
       async startContinuable(spec) {
         continuableStarts.push(spec)
         return { childId: 'child-1', messageId: 'message-1' }
+      },
+    },
+    sessionProjections: {
+      register(definition) {
+        projectionDefinitions.push(definition)
+        return () => {
+          const index = projectionDefinitions.indexOf(definition)
+          if (index >= 0) projectionDefinitions.splice(index, 1)
+        }
       },
     },
     settings: {
@@ -195,6 +206,7 @@ function createContext(options = {}) {
     effects,
     isDisposed: () => disposed,
     listeners,
+    projectionDefinitions,
     registeredTools,
     sections,
     settingsRegistration: () => settingsRegistration,
@@ -258,6 +270,7 @@ test('registers settings, setup skill, catalog, and configured model tool', asyn
 
   assert.equal(state.settingsRegistration().namespace, SETTINGS_NAMESPACE)
   assert.equal(state.settingsRegistration().options.applies, 'live')
+  assert.deepEqual(state.projectionDefinitions, [subagentModelRouteProjectionDefinition])
   assert.equal(state.skills.length, 1)
   assert.equal(state.skills[0].name, 'model-subagent-setup')
   assert.match(state.skills[0].content, /Call `model_subagent_catalog`/)
@@ -477,6 +490,41 @@ test('hot settings changes replace and remove the model-facing tool', async () =
   assert.equal(state.registeredTools.has('subagent_model'), false)
   assert.ok(state.registeredTools.get(CATALOG_TOOL_NAME))
   assert.equal(state.sections[0].text({ scope: {} }), '')
+})
+
+test('projects the adapter-resolved route only after the child descriptor', async () => {
+  const projection = subagentModelRouteProjectionDefinition
+  const inherited = {
+    type: 'request/header',
+    data: { header: { config: { provider: 'parent-provider', model: 'parent-model' } } },
+  }
+  const descriptor = { type: 'subagent/descriptor' }
+  const header = {
+    type: 'request/header',
+    data: { header: { config: { provider: 'acme', model: 'reasoner' } } },
+  }
+  const assistant = {
+    type: 'assistant/message',
+    data: { message: { source: { provider: 'backup', model: 'final-model' } } },
+  }
+
+  const initial = projection.init()
+  assert.equal(projection.apply(initial, inherited), initial)
+  const afterDescriptor = projection.apply(initial, descriptor)
+  assert.equal(projection.view(afterDescriptor), null)
+  const afterHeader = projection.apply(afterDescriptor, header)
+  assert.deepEqual(projection.view(afterHeader), { provider: 'acme', model: 'reasoner' })
+  assert.equal(projection.apply(afterHeader, header), afterHeader)
+  const afterAssistant = projection.apply(afterHeader, assistant)
+  assert.deepEqual(projection.view(afterAssistant), { provider: 'backup', model: 'final-model' })
+  assert.equal(projection.view(projection.apply(afterAssistant, descriptor)), null)
+
+  assert.equal(projection.schema.parse(null), null)
+  assert.deepEqual(projection.schema.parse({ provider: 'acme', model: 'reasoner' }), {
+    provider: 'acme',
+    model: 'reasoner',
+  })
+  assert.throws(() => projection.schema.parse({ provider: 'acme' }))
 })
 
 test('empty settings keep only bootstrap setup capabilities', async () => {

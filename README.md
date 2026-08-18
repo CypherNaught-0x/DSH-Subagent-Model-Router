@@ -12,13 +12,19 @@ A DeepSeek Harness Cordis plugin for delegating subagent work to a configured mo
 - **Settings → Subagent Models**: a Web settings page for manually adding, editing, and removing routes.
 - A hot-reloaded `subagent-dynamic-model` namespace in `~/.dsh/settings.yaml`.
 - Foreground execution and durable continuable background subagents.
+- An active-model chip in an opened subagent header.
+- Active-model chips in healthy rows of the parent session's subagent catalog.
 
 With an empty `models` list, only the catalog tool, settings page, and setup skill are registered. This provides a bootstrap state for initial setup.
+
+## Model identity chips
+
+The opened subagent header and every healthy row in its parent's subagent catalog show the model id from the latest adapter-resolved request. Hover and accessible text expose the complete `provider/model` route. The plugin resets the route at the child's own descriptor so a fork cannot inherit its ancestor's model, and it omits the chip until the child records an authoritative request route.
 
 ## Requirements
 
 - DeepSeek Harness `0.1.0-rc.6` or compatible
-- The Web profile for the settings page
+- The Web profile and built-in subagent conversation UI
 - A preset exposing the normal skill loader/tool
 - The Host `spawn` subagent provider, included by standard DSH profiles
 
@@ -123,6 +129,10 @@ Version 0.1 stored these values in an id-targeted profile `cordis.patch.yml` ent
 1. Copy that entry's `config` object under `subagent-dynamic-model:` in `~/.dsh/settings.yaml`.
 2. Remove the old `- id: dsh-subagent-dynamic-model` override from the profile patch. The plugin's bundle already mounts the row.
 3. Restart DSH once to load the new Host schema and Client settings page. Future settings changes apply live.
+
+## Known limitations
+
+DSH rc.6 has no additive slot inside a subagent catalog row, so the plugin owns the existing `subagent-catalog` header cell to render row chips. It claims that cell by registering at `priority: -1` — a list cell renders its lowest live priority, and the host's own entry sits at the default `0`. The `subagent-model` cell is registered the same way so a host build that also fills it stays shadowed rather than clashing. Catalog interaction changes in DSH must be mirrored here until the host exposes a row extension slot or renders `subagentModelRoute` itself.
 
 ## Development
 

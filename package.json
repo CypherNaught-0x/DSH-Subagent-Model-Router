@@ -1,6 +1,6 @@
 {
   "name": "dsh-subagent-dynamic-model",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Model-selectable subagents and guided model routing setup for DeepSeek Harness",
   "type": "module",
   "main": "./lib/index.js",
@@ -27,6 +27,7 @@
         "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-subagent",
         "@deepseek-ai/dsh-client-connection",
         "@deepseek-ai/dsh-api-remotes"
       ],
@@ -49,7 +50,8 @@
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.6"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.1"
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-tools": "0.1.0-rc.6"
