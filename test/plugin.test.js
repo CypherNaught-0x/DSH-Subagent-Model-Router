@@ -95,7 +95,10 @@ function createContext(options = {}) {
         registeredTools.set(tool.name, tool)
         return () => registeredTools.delete(tool.name)
       },
-      get(name) {
+      get(name, scope) {
+        if (name === WAIT_TOOL_NAME && options.scopedWaitTool !== undefined && options.scopedWaitTool.agent === scope) {
+          return options.scopedWaitTool.tool
+        }
         return registeredTools.get(name)
       },
     },
@@ -573,6 +576,25 @@ test('existing wait tool suppresses router tracking and guidance', async () => {
     subagentId: 'child-1',
     model: 'deep',
   })
+})
+
+test('scoped wait shadow suppresses tracking for that parent', async () => {
+  const parent = { id: 'scoped-parent', options: {} }
+  const scopedWait = { name: WAIT_TOOL_NAME, description: 'scoped wait implementation' }
+  const state = createContext({ scopedWaitTool: { agent: parent, tool: scopedWait } })
+  await apply(state.ctx)
+  const routerWait = state.registeredTools.get(WAIT_TOOL_NAME)
+  const delegation = state.registeredTools.get('subagent_model')
+
+  assert.notEqual(routerWait, scopedWait)
+  assert.equal(state.ctx.tools.get(WAIT_TOOL_NAME, parent), scopedWait)
+  assert.equal(state.sections[0].text({ scope: parent }), '')
+  await delegation.execute({
+    model: 'deep',
+    description: 'Scoped wait work',
+    prompt: 'Delegate through the scoped wait owner.',
+  }, execution({ agent: parent }))
+  assert.deepEqual(await routerWait.execute({}, execution({ agent: parent })), [])
 })
 
 test('Web settings route is loopback-only and persists validated revisions', async () => {
