@@ -33,6 +33,9 @@ const defaultSettings = {
 
 function createContext(options = {}) {
   const registeredTools = new Map()
+  if (options.existingWaitTool !== undefined) {
+    registeredTools.set(WAIT_TOOL_NAME, options.existingWaitTool)
+  }
   const listeners = new Map()
   const sections = []
   const skills = []
@@ -261,13 +264,13 @@ async function callWebRoute(route, options = {}) {
   }
 }
 
-function execution() {
+function execution(options = {}) {
   return {
     agent: {
-      id: 'parent-1',
+      id: options.agentId ?? 'parent-1',
       options: { provider: 'parent-provider', model: 'parent-model' },
     },
-    signal: new AbortController().signal,
+    signal: options.signal ?? new AbortController().signal,
   }
 }
 
@@ -392,7 +395,7 @@ test('waits for model-routed background children and returns their results', asy
     model: 'deep',
     label: 'Investigate issue',
     stopReason: 'completed',
-    output: 'Investigation complete.',
+    output: [{ type: 'text', text: 'Investigation complete.' }],
   }])
   assert.deepEqual(await wait.execute({}, execution()), [])
 })
@@ -423,8 +426,111 @@ test('captures a child that settles before background start returns', async () =
     model: 'deep',
     label: 'Quick investigation',
     stopReason: 'completed',
-    output: 'Already done.',
+    output: [{ type: 'text', text: 'Already done.' }],
   }])
+})
+
+test('preserves non-text child output in wait results', async () => {
+  const state = createContext()
+  await apply(state.ctx)
+  const delegation = state.registeredTools.get('subagent_model')
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  const output = [
+    { type: 'text', text: 'See attachment.' },
+    { type: 'image', mediaType: 'image/png', data: 'aW1hZ2U=' },
+  ]
+
+  await delegation.execute({
+    model: 'deep',
+    description: 'Inspect image',
+    prompt: 'Inspect the image.',
+  }, execution())
+  state.emit('subagent/end', {
+    runId: 'run-child-1',
+    provider: 'spawn',
+    id: 'child-1',
+    local: true,
+    stopReason: 'completed',
+    lastAssistantMessage: output,
+  })
+
+  const [result] = await wait.execute({}, execution())
+  assert.deepEqual(result.output, output)
+  assert.deepEqual(wait.output.render({}, [result]), [
+    { type: 'text', text: 'child-1 [completed] Inspect image (deep)' },
+    { type: 'text', text: '\n' },
+    ...output,
+  ])
+})
+
+test('cancelled waits retain child results for a retry', async () => {
+  const state = createContext()
+  await apply(state.ctx)
+  const delegation = state.registeredTools.get('subagent_model')
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  await delegation.execute({
+    model: 'deep',
+    description: 'Retry wait',
+    prompt: 'Complete later.',
+  }, execution())
+
+  const controller = new AbortController()
+  const cancelled = wait.execute({}, execution({ signal: controller.signal }))
+  controller.abort(new Error('stop waiting'))
+  await assert.rejects(cancelled, /stop waiting/)
+
+  state.emit('subagent/end', {
+    runId: 'run-child-1',
+    provider: 'spawn',
+    id: 'child-1',
+    local: true,
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Retry result.' }],
+  })
+  const [result] = await wait.execute({}, execution())
+  assert.equal(result.output[0].text, 'Retry result.')
+})
+
+test('parent disposal releases tracked children and active waits', async () => {
+  const state = createContext()
+  await apply(state.ctx)
+  const delegation = state.registeredTools.get('subagent_model')
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  await delegation.execute({
+    model: 'deep',
+    description: 'Disposed parent work',
+    prompt: 'Keep working.',
+  }, execution())
+
+  const waiting = wait.execute({}, execution())
+  state.emit('agent/disposed', { agent: { id: 'parent-1' } })
+  assert.deepEqual(await waiting, [{
+    subagentId: 'child-1',
+    model: 'deep',
+    label: 'Disposed parent work',
+    stopReason: 'aborted',
+    output: [],
+  }])
+})
+
+test('existing wait tool suppresses router tracking and guidance', async () => {
+  const existingWaitTool = { name: WAIT_TOOL_NAME, description: 'existing wait implementation' }
+  const state = createContext({ existingWaitTool })
+  await apply(state.ctx)
+
+  assert.equal(state.registeredTools.get(WAIT_TOOL_NAME), existingWaitTool)
+  assert.equal(state.listeners.has('subagent/end'), false)
+  assert.equal(state.sections[0].text({ scope: {} }), '')
+  const delegation = state.registeredTools.get('subagent_model')
+  assert.deepEqual(await delegation.execute({
+    model: 'deep',
+    description: 'Use existing wait',
+    prompt: 'Delegate without router tracking.',
+  }, execution()), {
+    kind: 'continuable',
+    subagentId: 'child-1',
+    model: 'deep',
+  })
 })
 
 test('Web settings route is loopback-only and persists validated revisions', async () => {

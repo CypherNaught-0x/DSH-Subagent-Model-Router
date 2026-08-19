@@ -20,7 +20,7 @@ With an empty `models` list, the catalog, configuration, and wait tools remain a
 
 ## Orchestrator behavior
 
-When model-selectable delegation is available, the system prompt tells the orchestrator not to duplicate work it delegated. After issuing all intended background delegations, it must call `wait-for-subagents` before synthesizing the child results or giving a final answer. The wait tool joins only background children started by that parent through `subagent_model`; foreground calls already return their result directly.
+When model-selectable delegation is available, the system prompt tells the orchestrator not to duplicate work it delegated. After issuing all intended background delegations, it must call `wait-for-subagents` before synthesizing the child results or giving a final answer. The wait tool joins only background children started by that parent through `subagent_model`, preserves every terminal content block, and drops retained records when the parent is disposed; foreground calls already return their result directly. If another plugin already owns the `wait-for-subagents` name, this plugin leaves it untouched and suppresses its wait-specific prompt guidance.
 
 ## Model identity chips
 
