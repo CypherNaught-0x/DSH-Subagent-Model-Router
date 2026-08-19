@@ -122,14 +122,6 @@ The delegation tool is always named `subagent_model`. Legacy `toolName` values f
 
 The live catalog is advisory: some adapters accept model ids they do not advertise. Manually entered ids remain allowed but should be user-confirmed.
 
-## Migrating from 0.1
-
-Version 0.1 stored these values in an id-targeted profile `cordis.patch.yml` entry. For 0.2:
-
-1. Copy that entry's `config` object under `subagent-dynamic-model:` in `~/.dsh/settings.yaml`.
-2. Remove the old `- id: dsh-subagent-dynamic-model` override from the profile patch. The plugin's bundle already mounts the row.
-3. Restart DSH once to load the new Host schema and Client settings page. Future settings changes apply live.
-
 ## Known limitations
 
 DSH rc.6 has no additive slot inside a subagent catalog row, so the plugin owns the existing `subagent-catalog` header cell to render row chips. It claims that cell by registering at `priority: -1` — a list cell renders its lowest live priority, and the host's own entry sits at the default `0`. The `subagent-model` cell is registered the same way so a host build that also fills it stays shadowed rather than clashing. Catalog interaction changes in DSH must be mirrored here until the host exposes a row extension slot or renders `subagentModelRoute` itself.
