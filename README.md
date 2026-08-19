@@ -5,7 +5,7 @@ A DeepSeek Harness Cordis plugin for delegating subagent work to a configured mo
 ## What it adds
 
 - `subagent_model`: a delegation tool whose `model` argument is restricted to user-configured aliases.
-- `wait-for-subagents`: a join tool that waits for this agent's outstanding model-routed background children and returns their terminal results.
+- `wait-for-subagents`: a join tool that waits for this agent's outstanding continuable background children, including standard and model-routed delegations, and returns their terminal results.
 - Per-model tags and routing descriptions embedded in the tool schema and system prompt.
 - `model_subagent_catalog`: a read-only view of models advertised by registered LLM providers.
 - `configure_subagent_models`: a namespace-scoped model-facing tool for reading or updating this plugin's settings without filesystem access.
@@ -20,7 +20,7 @@ With an empty `models` list, the catalog, configuration, and wait tools remain a
 
 ## Orchestrator behavior
 
-When model-selectable delegation is available, the system prompt tells the orchestrator not to duplicate work it delegated. After issuing all intended background delegations, it must call `wait-for-subagents` before synthesizing the child results or giving a final answer. The wait tool joins only background children started by that parent through `subagent_model`, preserves every terminal content block, and drops retained records when the parent is disposed; foreground calls already return their result directly. If another plugin already owns or scope-shadows the `wait-for-subagents` name, this plugin leaves it untouched and suppresses its wait-specific guidance and tracking for the affected agents.
+When model-selectable delegation is available, the system prompt tells the orchestrator not to duplicate work it delegated. After issuing all intended background delegations, it must call `wait-for-subagents` before synthesizing the child results or giving a final answer. The wait tool joins every continuable background child started by that parent, whether through a standard delegation tool or `subagent_model`; it remains useful when no model routes are configured. It preserves every terminal content block and drops retained records when the parent is disposed, while foreground calls already return their result directly. If another plugin already owns or scope-shadows the `wait-for-subagents` name, this plugin leaves it untouched and suppresses its wait-specific guidance and tracking for the affected agents.
 
 ## Model identity chips
 

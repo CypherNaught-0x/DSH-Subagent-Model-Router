@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { scopeTarget } from '@deepseek-ai/dsh-scope'
 import {
   apply,
   CATALOG_TOOL_NAME,
@@ -79,6 +80,7 @@ function createContext(options = {}) {
 
   const ctx = {
     get(name) {
+      if (name === 'agents') return options.agents
       if (name !== 'webServer' || options.withWebServer !== true) return undefined
       return {
         register(route) {
@@ -121,9 +123,16 @@ function createContext(options = {}) {
       },
       async startContinuable(spec) {
         continuableStarts.push(spec)
+        const emit = (event, info) => listeners.get(event)?.call(scopeTarget(ctx.subagents, spec.request.parent), info)
         if (options.startContinuable !== undefined) {
-          return options.startContinuable(spec, (event, info) => listeners.get(event)?.(info))
+          return options.startContinuable(spec, emit)
         }
+        emit('subagent/start', {
+          runId: 'run-child-1',
+          provider: spec.provider,
+          id: 'child-1',
+          local: true,
+        })
         return { childId: 'child-1', messageId: 'message-1' }
       },
     },
@@ -214,8 +223,10 @@ function createContext(options = {}) {
     ctx,
     continuableStarts,
     effects,
-    emit(event, info) {
-      listeners.get(event)?.(info)
+    emit(event, info, parent) {
+      const listener = listeners.get(event)
+      if (parent === undefined) listener?.(info)
+      else listener?.call(scopeTarget(ctx.subagents, parent), info)
     },
     isDisposed: () => disposed,
     listeners,
@@ -409,6 +420,63 @@ test('waits for model-routed background children and returns their results', asy
     output: [{ type: 'text', text: 'Investigation complete.' }],
   }])
   assert.deepEqual(await wait.execute({}, execution()), [])
+})
+
+test('waits for standard background children when no model routes are configured', async () => {
+  const parentExec = execution({ agentId: 'standard-parent' })
+  const state = createContext({
+    settings: defaultSettings,
+    agents: {
+      get(id) {
+        assert.equal(id, 'standard-child')
+        return {
+          session: {
+            events: [{
+              type: 'subagent/descriptor',
+              data: {
+                version: 2,
+                mode: 'continuable',
+                provider: 'spawn',
+                label: 'Standard investigation',
+              },
+            }],
+          },
+        }
+      },
+    },
+  })
+  await apply(state.ctx)
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  assert.equal(state.registeredTools.has('subagent_model'), false)
+
+  state.emit('subagent/start', {
+    runId: 'run-standard-child',
+    provider: 'spawn',
+    id: 'standard-child',
+    local: true,
+  }, parentExec.agent)
+  const waiting = wait.execute({}, parentExec)
+  state.emit('subagent/end', {
+    runId: 'run-standard-child',
+    provider: 'spawn',
+    id: 'standard-child',
+    local: true,
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Standard investigation complete.' }],
+  }, parentExec.agent)
+
+  const result = await waiting
+  assert.deepEqual(result, [{
+    subagentId: 'standard-child',
+    label: 'Standard investigation',
+    stopReason: 'completed',
+    output: [{ type: 'text', text: 'Standard investigation complete.' }],
+  }])
+  assert.deepEqual(wait.output.render({}, result), [
+    { type: 'text', text: 'standard-child [completed] Standard investigation' },
+    { type: 'text', text: '\n' },
+    { type: 'text', text: 'Standard investigation complete.' },
+  ])
 })
 
 test('captures a child that settles before background start returns', async () => {

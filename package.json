@@ -47,6 +47,7 @@
   ],
   "license": "MIT",
   "peerDependencies": {
+    "@deepseek-ai/dsh-scope": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.6"
   },
   "dependencies": {
@@ -54,6 +55,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@deepseek-ai/dsh-scope": "0.1.0-rc.7",
     "@deepseek-ai/dsh-tools": "0.1.0-rc.6"
   }
 }
