@@ -43,13 +43,6 @@ dsh plugin --profile web add dsh-subagent-model-router
 dsh plugin --profile web add ./dsh-subagent-model-router
 ```
 
-If `cordis-plugin-development` is still installed, remove it first:
-
-```sh
-dsh plugin --profile web remove cordis-plugin-development
-dsh plugin --profile web add ./dsh-subagent-model-router
-```
-
 Restart `dsh web` after installation and refresh the page. Open **Settings → Subagent Models**, or invoke:
 
 ```text
