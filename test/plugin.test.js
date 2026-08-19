@@ -264,12 +264,20 @@ async function callWebRoute(route, options = {}) {
   }
 }
 
+const executionAgents = new Map()
+
 function execution(options = {}) {
-  return {
-    agent: {
-      id: options.agentId ?? 'parent-1',
+  const agentId = options.agentId ?? 'parent-1'
+  let agent = options.agent ?? executionAgents.get(agentId)
+  if (agent === undefined) {
+    agent = {
+      id: agentId,
       options: { provider: 'parent-provider', model: 'parent-model' },
-    },
+    }
+    executionAgents.set(agentId, agent)
+  }
+  return {
+    agent,
     signal: options.signal ?? new AbortController().signal,
   }
 }
@@ -503,7 +511,7 @@ test('parent disposal releases tracked children and active waits', async () => {
   }, execution())
 
   const waiting = wait.execute({}, execution())
-  state.emit('agent/disposed', { agent: { id: 'parent-1' } })
+  state.emit('agent/disposed', { agent: execution().agent })
   assert.deepEqual(await waiting, [{
     subagentId: 'child-1',
     model: 'deep',
@@ -511,6 +519,40 @@ test('parent disposal releases tracked children and active waits', async () => {
     stopReason: 'aborted',
     output: [],
   }])
+})
+
+test('disposing an old same-id agent does not clear replacement tracking', async () => {
+  const state = createContext()
+  await apply(state.ctx)
+  const delegation = state.registeredTools.get('subagent_model')
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  const oldAgent = { id: 'reused-parent', options: {} }
+  const replacement = { id: 'reused-parent', options: {} }
+  await delegation.execute({
+    model: 'deep',
+    description: 'Replacement work',
+    prompt: 'Finish replacement work.',
+  }, execution({ agent: replacement }))
+
+  let finished = false
+  const waiting = wait.execute({}, execution({ agent: replacement })).then((result) => {
+    finished = true
+    return result
+  })
+  state.emit('agent/disposed', { agent: oldAgent })
+  await Promise.resolve()
+  assert.equal(finished, false)
+
+  state.emit('subagent/end', {
+    runId: 'run-child-1',
+    provider: 'spawn',
+    id: 'child-1',
+    local: true,
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Replacement complete.' }],
+  })
+  const [result] = await waiting
+  assert.equal(result.output[0].text, 'Replacement complete.')
 })
 
 test('existing wait tool suppresses router tracking and guidance', async () => {
