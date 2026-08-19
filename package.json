@@ -1,6 +1,6 @@
 {
   "name": "dsh-subagent-model-router",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Model-selectable subagents and guided model routing setup for DeepSeek Harness",
   "type": "module",
   "main": "./lib/index.js",
