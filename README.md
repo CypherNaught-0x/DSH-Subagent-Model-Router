@@ -5,6 +5,7 @@ A DeepSeek Harness Cordis plugin for delegating subagent work to a configured mo
 ## What it adds
 
 - `subagent_model`: a delegation tool whose `model` argument is restricted to user-configured aliases.
+- `wait-for-subagents`: a join tool that waits for this agent's outstanding model-routed background children and returns their terminal results.
 - Per-model tags and routing descriptions embedded in the tool schema and system prompt.
 - `model_subagent_catalog`: a read-only view of models advertised by registered LLM providers.
 - `configure_subagent_models`: a namespace-scoped model-facing tool for reading or updating this plugin's settings without filesystem access.
@@ -15,7 +16,11 @@ A DeepSeek Harness Cordis plugin for delegating subagent work to a configured mo
 - An active-model chip in an opened subagent header.
 - Active-model chips in healthy rows of the parent session's subagent catalog.
 
-With an empty `models` list, only the catalog tool, settings page, and setup skill are registered. This provides a bootstrap state for initial setup.
+With an empty `models` list, the catalog, configuration, and wait tools remain available alongside the settings page and setup skill, but `subagent_model` is not registered. This provides a bootstrap state for initial setup.
+
+## Orchestrator behavior
+
+When model-selectable delegation is available, the system prompt tells the orchestrator not to duplicate work it delegated. After issuing all intended background delegations, it must call `wait-for-subagents` before synthesizing the child results or giving a final answer. The wait tool joins only background children started by that parent through `subagent_model`; foreground calls already return their result directly.
 
 ## Model identity chips
 

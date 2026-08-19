@@ -5,6 +5,7 @@ import {
   CATALOG_TOOL_NAME,
   CONFIG_TOOL_NAME,
   SETTINGS_NAMESPACE,
+  WAIT_TOOL_NAME,
   subagentModelRouteProjectionDefinition,
 } from '../lib/index.js'
 
@@ -114,6 +115,9 @@ function createContext(options = {}) {
       },
       async startContinuable(spec) {
         continuableStarts.push(spec)
+        if (options.startContinuable !== undefined) {
+          return options.startContinuable(spec, (event, info) => listeners.get(event)?.(info))
+        }
         return { childId: 'child-1', messageId: 'message-1' }
       },
     },
@@ -204,6 +208,9 @@ function createContext(options = {}) {
     ctx,
     continuableStarts,
     effects,
+    emit(event, info) {
+      listeners.get(event)?.(info)
+    },
     isDisposed: () => disposed,
     listeners,
     projectionDefinitions,
@@ -282,8 +289,10 @@ test('registers settings, setup skill, catalog, and configured model tool', asyn
   const catalog = state.registeredTools.get(CATALOG_TOOL_NAME)
   const configuration = state.registeredTools.get(CONFIG_TOOL_NAME)
   const delegation = state.registeredTools.get('subagent_model')
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   assert.ok(catalog)
   assert.ok(configuration)
+  assert.ok(wait)
   assert.equal(configuration.parameters.properties.tool_name, undefined)
   assert.ok(delegation)
   assert.deepEqual(delegation.parameters.properties.model.enum, ['deep'])
@@ -292,6 +301,8 @@ test('registers settings, setup skill, catalog, and configured model tool', asyn
 
   const sectionText = state.sections[0].text({ scope: {} })
   assert.match(sectionText, /acme\/reasoner/)
+  assert.match(sectionText, /do not also perform that task yourself/)
+  assert.match(sectionText, /call `wait-for-subagents`/)
 
   const result = await catalog.execute({}, execution())
   assert.deepEqual(result.current, {
@@ -349,6 +360,71 @@ test('starts a durable background child by default', async () => {
     model: 'reasoner',
     maxTokens: 8192,
   })
+})
+
+test('waits for model-routed background children and returns their results', async () => {
+  const state = createContext()
+  await apply(state.ctx)
+  const delegation = state.registeredTools.get('subagent_model')
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+
+  await delegation.execute({
+    model: 'deep',
+    description: 'Investigate issue',
+    prompt: 'Investigate the issue.',
+  }, execution())
+
+  let finished = false
+  const waiting = wait.execute({}, execution()).then((result) => {
+    finished = true
+    return result
+  })
+  await Promise.resolve()
+  assert.equal(finished, false)
+
+  state.emit('subagent/end', {
+    id: 'child-1',
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Investigation complete.' }],
+  })
+  assert.deepEqual(await waiting, [{
+    subagentId: 'child-1',
+    model: 'deep',
+    label: 'Investigate issue',
+    stopReason: 'completed',
+    output: 'Investigation complete.',
+  }])
+  assert.deepEqual(await wait.execute({}, execution()), [])
+})
+
+test('captures a child that settles before background start returns', async () => {
+  const state = createContext({
+    startContinuable(_spec, emit) {
+      emit('subagent/end', {
+        id: 'child-early',
+        stopReason: 'completed',
+        lastAssistantMessage: [{ type: 'text', text: 'Already done.' }],
+      })
+      return { childId: 'child-early', messageId: 'message-early' }
+    },
+  })
+  await apply(state.ctx)
+  const delegation = state.registeredTools.get('subagent_model')
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+
+  await delegation.execute({
+    model: 'deep',
+    description: 'Quick investigation',
+    prompt: 'Investigate quickly.',
+  }, execution())
+
+  assert.deepEqual(await wait.execute({}, execution()), [{
+    subagentId: 'child-early',
+    model: 'deep',
+    label: 'Quick investigation',
+    stopReason: 'completed',
+    output: 'Already done.',
+  }])
 })
 
 test('Web settings route is loopback-only and persists validated revisions', async () => {
@@ -533,6 +609,7 @@ test('empty settings keep only bootstrap setup capabilities', async () => {
 
   assert.ok(state.registeredTools.get(CATALOG_TOOL_NAME))
   assert.ok(state.registeredTools.get(CONFIG_TOOL_NAME))
+  assert.ok(state.registeredTools.get(WAIT_TOOL_NAME))
   assert.equal(state.registeredTools.has('subagent_model'), false)
   assert.equal(state.skills[0].name, 'model-subagent-setup')
   assert.equal(state.sections.length, 1)
