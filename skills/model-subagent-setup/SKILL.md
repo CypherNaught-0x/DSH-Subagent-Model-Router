@@ -1,6 +1,6 @@
 # Set up model-selectable subagents
 
-Use this skill to choose which existing Harness model routes are exposed through `subagent_model`, then generate concise routing guidance for each route. Configuration is stored under `subagent-dynamic-model` in `settings.yaml`; do not put model configuration in a Cordis patch.
+Use this skill to choose which existing Harness model routes are exposed through `subagent_model`, then generate concise routing guidance for each route. Configuration is stored under `subagent-model-router` in `settings.yaml`; do not put model configuration in a Cordis patch.
 
 ## Workflow
 
@@ -27,7 +27,7 @@ Use this skill to choose which existing Harness model routes are exposed through
 ## Settings shape
 
 ```yaml
-subagent-dynamic-model:
+subagent-model-router:
   subagentProvider: spawn
   maxDepth: 3
   enableRunInBackground: true

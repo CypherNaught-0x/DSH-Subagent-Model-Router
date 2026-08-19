@@ -1,4 +1,4 @@
-# dsh-subagent-dynamic-model
+# dsh-subagent-model-router
 
 A DeepSeek Harness Cordis plugin for delegating subagent work to a configured model route that can differ from the parent agent's current model.
 
@@ -10,7 +10,7 @@ A DeepSeek Harness Cordis plugin for delegating subagent work to a configured mo
 - `configure_subagent_models`: a namespace-scoped model-facing tool for reading or updating this plugin's settings without filesystem access.
 - `model-subagent-setup`: a guided skill for selecting routes, generating routing guidance, obtaining confirmation, and saving through the constrained configuration tool.
 - **Settings → Subagent Models**: a Web settings page for manually adding, editing, and removing routes.
-- A hot-reloaded `subagent-dynamic-model` namespace in `~/.dsh/settings.yaml`.
+- A hot-reloaded `subagent-model-router` namespace in `~/.dsh/settings.yaml`.
 - Foreground execution and durable continuable background subagents.
 - An active-model chip in an opened subagent header.
 - Active-model chips in healthy rows of the parent session's subagent catalog.
@@ -32,17 +32,17 @@ The opened subagent header and every healthy row in its parent's subagent catalo
 
 ```sh
 # From npm once published
-dsh plugin --profile web add dsh-subagent-dynamic-model
+dsh plugin --profile web add dsh-subagent-model-router
 
 # Or from this checkout
-dsh plugin --profile web add ./dsh-subagent-dynamic-model
+dsh plugin --profile web add ./dsh-subagent-model-router
 ```
 
 If `cordis-plugin-development` is still installed, remove it first:
 
 ```sh
 dsh plugin --profile web remove cordis-plugin-development
-dsh plugin --profile web add ./dsh-subagent-dynamic-model
+dsh plugin --profile web add ./dsh-subagent-model-router
 ```
 
 Restart `dsh web` after installation and refresh the page. Open **Settings → Subagent Models**, or invoke:
@@ -70,7 +70,7 @@ The endpoint rejects non-loopback connections and cross-origin mutations, so the
 
 - `action: "get"` reads the current normalized settings.
 - `action: "update"` replaces the complete model list and optionally changes the backend, depth, or background policy.
-- The tool calls the Settings service directly and can modify only `subagent-dynamic-model`; it accepts no filesystem path and cannot read or write other namespaces.
+- The tool calls the Settings service directly and can modify only `subagent-model-router`; it accepts no filesystem path and cannot read or write other namespaces.
 - Updates pass the same schema and provider-capability validation as the Web UI, persist to `settings.yaml`, and apply live.
 
 The update action is intentionally documented for direct user-requested changes only. The setup skill must show the complete proposed list and receive explicit confirmation before calling it.
@@ -80,7 +80,7 @@ The update action is intentionally documented for direct user-requested changes 
 Merge the following namespace into `~/.dsh/settings.yaml`:
 
 ```yaml
-subagent-dynamic-model:
+subagent-model-router:
   subagentProvider: spawn
   maxDepth: 3
   enableRunInBackground: true
@@ -136,7 +136,7 @@ pnpm test
 Project layout:
 
 ```text
-dsh-subagent-dynamic-model/
+dsh-subagent-model-router/
 ├── lib/
 │   ├── index.js
 │   ├── client.js

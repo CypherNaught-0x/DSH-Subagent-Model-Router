@@ -356,7 +356,7 @@ test('Web settings route is loopback-only and persists validated revisions', asy
   await apply(state.ctx)
   const route = state.webRoute()
   assert.equal(route.kind, 'exact')
-  assert.equal(route.path, '/dsh-subagent-dynamic-model/settings')
+  assert.equal(route.path, '/dsh-subagent-model-router/settings')
 
   const current = await callWebRoute(route)
   assert.equal(current.status, 200)

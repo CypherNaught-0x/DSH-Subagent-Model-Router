@@ -54,7 +54,7 @@ async function loadClient(options = {}) {
 
 test('client bundle registers a dedicated settings section', async () => {
   const { definition, plugin } = await loadClient()
-  assert.equal(definition.id, 'dsh-subagent-dynamic-model')
+  assert.equal(definition.id, 'dsh-subagent-model-router')
   assert.deepEqual(plugin.inject, ['slots', 'connection', 'remote', 'sessions'])
 
   const registrations = []
@@ -104,7 +104,7 @@ test('client bundle registers a dedicated settings section', async () => {
     locale: 'subagent',
   }, {
     name: 'settings.section',
-    id: 'subagent-dynamic-model',
+    id: 'subagent-model-router',
     order: 25,
     label: 'Subagent Models',
   }])
@@ -267,7 +267,7 @@ test('catalog unmount closes every expanded descendant with the service receiver
 
 test('client uses the plugin endpoint instead of the rc.6 allowlisted settings API', async () => {
   const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
-  assert.match(source, /\/dsh-subagent-dynamic-model\/settings/)
+  assert.match(source, /\/dsh-subagent-model-router\/settings/)
   assert.match(source, /\/model-subagent-setup/)
   assert.doesNotMatch(source, /label: 'Tool name'/)
   assert.doesNotMatch(source, /api\.settings\.describe/)
