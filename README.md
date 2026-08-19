@@ -39,8 +39,8 @@ The opened subagent header and every healthy row in its parent's subagent catalo
 # From npm once published
 dsh plugin --profile web add dsh-subagent-model-router
 
-# Or from this checkout
-dsh plugin --profile web add ./dsh-subagent-model-router
+# Or from inside this checkout
+dsh plugin --profile web add .
 ```
 
 Restart `dsh web` after installation and refresh the page. Open **Settings → Subagent Models**, or invoke:
