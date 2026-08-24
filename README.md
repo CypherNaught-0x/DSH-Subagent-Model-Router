@@ -60,7 +60,7 @@ The **Subagent Models** settings page provides controls for:
 
 On DSH rc.6, the built-in Web settings API exposes only a fixed namespace allowlist. This plugin therefore uses a package-owned, same-origin Host endpoint backed by the same Settings service, schema validation, persistence, and revision conflict protection. Successful changes apply live: the old delegation tool is removed and the updated schema and prompt guidance are registered immediately.
 
-The endpoint rejects non-loopback connections and cross-origin mutations, so the page is unavailable from a non-local browser connection.
+The endpoint rejects non-loopback transport and cross-origin mutations by default. A trusted loopback reverse proxy may allow specific browser origins with the comma-separated `DSH_SUBAGENT_MODEL_ROUTER_TRUSTED_ORIGINS` environment variable, for example `https://dsh.example.test`. Requests must still arrive over loopback, and each mutation Origin must exactly match both the request Host and an allowlisted origin.
 
 ## Configure through the model-facing tool
 

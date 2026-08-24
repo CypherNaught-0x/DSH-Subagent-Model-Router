@@ -735,6 +735,26 @@ test('Web settings route is loopback-only and persists validated revisions', asy
     body: { section, expectedRevision: 1 },
   })
   assert.equal(reboundHost.status, 403)
+
+  const trustedOriginsVariable = 'DSH_SUBAGENT_MODEL_ROUTER_TRUSTED_ORIGINS'
+  const previousTrustedOrigins = process.env[trustedOriginsVariable]
+  process.env[trustedOriginsVariable] = 'https://dsh.example.test'
+  try {
+    const trustedProxy = await callWebRoute(route, {
+      method: 'PUT',
+      headers: {
+        host: 'dsh.example.test',
+        origin: 'https://dsh.example.test',
+        'content-type': 'application/json',
+      },
+      body: { section, expectedRevision: 1 },
+    })
+    assert.equal(trustedProxy.status, 200)
+    assert.equal(trustedProxy.body.descriptor.revision, 2)
+  } finally {
+    if (previousTrustedOrigins === undefined) delete process.env[trustedOriginsVariable]
+    else process.env[trustedOriginsVariable] = previousTrustedOrigins
+  }
 })
 
 test('configuration tool reads and updates only the plugin settings namespace', async () => {
