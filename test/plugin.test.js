@@ -206,6 +206,7 @@ function createContext(options = {}) {
     },
     logger: {
       info() {},
+      warn() {},
       error() {},
     },
     on(event, listener) {
@@ -420,6 +421,78 @@ test('waits for model-routed background children and returns their results', asy
     output: [{ type: 'text', text: 'Investigation complete.' }],
   }])
   assert.deepEqual(await wait.execute({}, execution()), [])
+})
+
+test('watchdog recovers a completed child after its terminal event is missed', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const children = new Map()
+  const child = {
+    id: 'child-watchdog',
+    session: {
+      events: [{
+        type: 'subagent/descriptor',
+        data: {
+          version: 2,
+          mode: 'continuable',
+          provider: 'spawn',
+          label: 'Watchdog investigation',
+          agentModel: 'deep',
+        },
+      }],
+    },
+  }
+  const agents = { get: (id) => children.get(id) }
+  const state = createContext({
+    agents,
+    startContinuable(spec, emit) {
+      children.set(child.id, child)
+      emit('subagent/start', {
+        runId: 'run-watchdog',
+        provider: spec.provider,
+        id: child.id,
+        local: true,
+      })
+      return { childId: child.id, messageId: 'message-watchdog' }
+    },
+  })
+  await apply(state.ctx)
+  const delegation = state.registeredTools.get('subagent_model')
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+
+  await delegation.execute({
+    model: 'deep',
+    description: 'Watchdog investigation',
+    prompt: 'Complete while the host is suspended.',
+  }, execution())
+  let finished = false
+  const waiting = wait.execute({}, execution()).then((result) => {
+    finished = true
+    return result
+  })
+  t.mock.timers.tick(10_000)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(finished, false)
+
+  child.session.events.push(
+    { type: 'turn/start', data: { turn: 0 } },
+    { type: 'step/start', data: { turn: 0, step: 0 } },
+    {
+      type: 'assistant/message',
+      data: { message: { content: [{ type: 'text', text: 'Recovered result.' }] } },
+    },
+    { type: 'step/end', data: { turn: 0, step: 0 } },
+    { type: 'turn/end', data: { turn: 0, reason: { kind: 'completed' } } },
+  )
+  children.delete(child.id)
+
+  t.mock.timers.tick(10_000)
+  assert.deepEqual(await waiting, [{
+    subagentId: 'child-watchdog',
+    model: 'deep',
+    label: 'Watchdog investigation',
+    stopReason: 'completed',
+    output: [{ type: 'text', text: 'Recovered result.' }],
+  }])
 })
 
 test('waits for standard background children when no model routes are configured', async () => {
