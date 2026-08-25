@@ -924,8 +924,11 @@ test('projects the adapter-resolved route only after the child descriptor', asyn
   assert.equal(projection.apply(afterHeader, header), afterHeader)
   const afterAssistant = projection.apply(afterHeader, assistant)
   assert.deepEqual(projection.view(afterAssistant), { provider: 'backup', model: 'final-model' })
+  assert.deepEqual(projection.wire.view(afterAssistant), { provider: 'backup', model: 'final-model' })
   assert.equal(projection.view(projection.apply(afterAssistant, descriptor)), null)
 
+  assert.deepEqual(projection.stateSchema.parse(afterAssistant), afterAssistant)
+  assert.equal(projection.wire.viewSchema.parse(null), null)
   assert.equal(projection.schema.parse(null), null)
   assert.deepEqual(projection.schema.parse({ provider: 'acme', model: 'reasoner' }), {
     provider: 'acme',

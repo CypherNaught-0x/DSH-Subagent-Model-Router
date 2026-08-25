@@ -15,6 +15,7 @@ A DeepSeek Harness Cordis plugin for delegating subagent work to a configured mo
 - Foreground execution and durable continuable background subagents.
 - An active-model chip in an opened subagent header.
 - Active-model chips in healthy rows of the parent session's subagent catalog.
+- An optional inline model chip in each existing Better Sidebar **Tasks** row.
 
 With an empty `models` list, the catalog, configuration, and wait tools remain available alongside the settings page and setup skill, but `subagent_model` is not registered. This provides a bootstrap state for initial setup.
 
@@ -24,7 +25,9 @@ When model-selectable delegation is available, the system prompt tells the orche
 
 ## Model identity chips
 
-The opened subagent header and every healthy row in its parent's subagent catalog show the model id from the latest adapter-resolved request. Hover and accessible text expose the complete `provider/model` route. The plugin resets the route at the child's own descriptor so a fork cannot inherit its ancestor's model, and it omits the chip until the child records an authoritative request route.
+The opened subagent header and every healthy row in its parent's subagent catalog show the configured friendly display name for the latest adapter-resolved request, falling back to the model id when that route is not in the current router settings. Hover and accessible text expose the complete `provider/model` route. The plugin resets the route at the child's own descriptor so a fork cannot inherit its ancestor's model, and it omits the chip until the child records an authoritative request route.
+
+When Better Sidebar is installed, the router's client extension maps its semantic **Tasks** tree rows to the authoritative DSH session/catalog snapshot and appends a compact, non-interactive chip beside each subagent label. It reuses the native header/catalog projection and friendly-name formatter, preserves completed-run identity, and adds the full route to the tree row's accessible name. The observer and every injected node are lifecycle-managed and removed when the router unloads. No Better Sidebar source change, replacement tab, runtime import, or settings toggle is required; when Better Sidebar is absent, the extension is inert.
 
 ## Requirements
 
@@ -32,6 +35,7 @@ The opened subagent header and every healthy row in its parent's subagent catalo
 - The Web profile and built-in subagent conversation UI
 - A preset exposing the normal skill loader/tool
 - The Host `spawn` subagent provider, included by standard DSH profiles
+- Optional: a compatible `dsh-better-sidebar` release with its semantic Tasks tree (`0.15.2` and `0.16.x` are supported)
 
 ## Install
 
@@ -123,6 +127,8 @@ The live catalog is advisory: some adapters accept model ids they do not adverti
 ## Known limitations
 
 DSH rc.6 has no additive slot inside a subagent catalog row, so the plugin owns the existing `subagent-catalog` header cell to render row chips. It claims that cell by registering at `priority: -1` — a list cell renders its lowest live priority, and the host's own entry sits at the default `0`. The `subagent-model` cell is registered the same way so a host build that also fills it stays shadowed rather than clashing. Catalog interaction changes in DSH must be mirrored here until the host exposes a row extension slot or renders `subagentModelRoute` itself.
+
+Better Sidebar currently exposes tab and file-viewer registration but no additive seam inside its built-in Tasks rows. To keep the feature wholly owned by this plugin, the router targets only Better Sidebar's semantic root/tree/treeitem attributes and the public DSH sessions snapshot; it does not depend on CSS-module class names. An incompatible change to that semantic DOM may require a router update. The router deliberately contributes no fallback topology tab, keeping one authoritative task tree.
 
 ## Development
 
