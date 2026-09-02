@@ -1,6 +1,36 @@
-# dsh-subagent-model-router
+# DSH Subagent Model Router
 
-A DeepSeek Harness Cordis plugin for delegating subagent work to a configured model route that can differ from the parent agent's current model.
+**Give every delegated task the right model—automatically.**
+
+Stop using one model for every kind of work. Configure your preferred fast, affordable, specialized, and high-reasoning models once; the router gives your agent the aliases, tags, and guidance it needs to intelligently select the best route for each delegated task.
+
+That means faster routine work, stronger results on difficult problems, better control over cost, and less model micromanagement. Subagents can run in parallel, their results are reliably joined before the parent responds, and the model chosen for each task stays visible throughout the UI.
+
+## Why use it?
+
+- **Better results where they matter** — reserve your strongest models for architecture, security, deep reasoning, or critical review.
+- **Lower cost and latency** — send routine searches, edits, and focused implementation work to faster or more economical routes.
+- **Automatic, task-aware routing** — friendly aliases, capability tags, and plain-language usage guidance help the orchestrator choose intelligently.
+- **Confident parallel delegation** — launch multiple specialists in the background and reliably collect every result before synthesis.
+- **Clear model visibility** — see which model actually handled a task in subagent headers, catalog rows, and Better Sidebar's Tasks view.
+- **Easy setup** — configure your model team from the Web UI, through a guided skill, or directly in `settings.yaml`.
+
+> [!TIP]
+> Already using [Better Sidebar](https://github.com/omdsh-dev/DSH-better-sidebar)? The router enhances its existing **Tasks** tree with inline model chips—no separate topology view or Better Sidebar modification required.
+
+## See it in action
+
+### Follow every specialist from Better Sidebar
+
+![Better Sidebar Tasks view showing delegated subagents and their selected model chips](docs/screenshots/better-sidebar-task-model-chips.png)
+
+*See parallel delegated work, current status, and the selected model together in the task tree you already use.*
+
+### Build your ideal model team
+
+![Subagent Model Router settings for aliases, providers, tags, token limits, and routing guidance](docs/screenshots/subagent-model-router-settings.png)
+
+*Define friendly routes and tell the orchestrator when each model shines—from quick, budget-friendly tasks to your most demanding work.*
 
 ## What it adds
 
