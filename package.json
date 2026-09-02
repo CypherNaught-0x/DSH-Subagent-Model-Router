@@ -13,6 +13,7 @@
   "files": [
     "lib",
     "skills",
+    "docs",
     "examples",
     "cordis.patch.yml",
     "README.md",
