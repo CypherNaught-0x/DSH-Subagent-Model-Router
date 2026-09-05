@@ -55,6 +55,36 @@ async function loadClient(options = {}) {
   }
 }
 
+test('model editor cards keep stable identity through edits and array changes', async () => {
+  const { plugin } = await loadClient()
+  const draft = plugin.draftFromValue({ models: [
+    { alias: 'fast', provider: 'acme', model: 'reasoner', description: 'quick' },
+    { alias: 'deep', provider: 'acme', model: 'deliberate', description: 'careful' },
+  ] })
+  const firstKey = draft.models[0].rowKey
+  const secondKey = draft.models[1].rowKey
+  const edited = { ...draft.models[0], alias: 'fast-renamed' }
+  assert.equal(edited.rowKey, firstKey)
+  const afterRemove = [edited]
+  assert.equal(afterRemove[0].rowKey, firstKey)
+  const added = [...afterRemove, plugin.emptyModel()]
+  assert.equal(added[0].rowKey, firstKey)
+  assert.notEqual(added[1].rowKey, firstKey)
+  assert.notEqual(added[1].rowKey, secondKey)
+
+  const reset = plugin.draftFromValue({ models: [{ alias: 'fast', provider: 'acme', model: 'reasoner', description: 'quick' }] })
+  assert.notEqual(reset.models[0].rowKey, firstKey)
+  assert.deepEqual(plugin.settingsFromDraft({ ...draft, models: added }), {
+    subagentProvider: 'spawn',
+    maxDepth: 3,
+    enableRunInBackground: true,
+    models: [
+      { alias: 'fast-renamed', provider: 'acme', model: 'reasoner', tags: [], description: 'quick' },
+      { alias: '', provider: '', model: '', tags: [], description: '' },
+    ],
+  })
+})
+
 test('client bundle registers a dedicated settings section', async () => {
   const { definition, plugin } = await loadClient()
   assert.equal(definition.id, 'dsh-subagent-model-router')
