@@ -388,6 +388,68 @@ test('starts a durable background child by default', async () => {
   })
 })
 
+test('tracks and settles a model-routed child through current Session snapshots', async () => {
+  const children = new Map()
+  const events = [{
+    type: 'subagent/descriptor',
+    data: {
+      version: 2,
+      mode: 'continuable',
+      provider: 'spawn',
+      label: 'Snapshot investigation',
+      agentModel: 'deep',
+    },
+  }]
+  const child = {
+    id: 'child-snapshot',
+    session: { snapshotEvents: () => events.slice() },
+  }
+  const state = createContext({
+    agents: { get: (id) => children.get(id) },
+    startContinuable(spec, emit) {
+      children.set(child.id, child)
+      emit('subagent/start', {
+        runId: 'run-snapshot',
+        provider: spec.provider,
+        id: child.id,
+        local: true,
+      })
+      return { childId: child.id, messageId: 'message-snapshot' }
+    },
+  })
+  await apply(state.ctx)
+  const delegation = state.registeredTools.get('subagent_model')
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+
+  const started = await delegation.execute({
+    model: 'deep',
+    description: 'Snapshot investigation',
+    prompt: 'Investigate the current runtime contract.',
+  }, execution())
+  assert.deepEqual(started, {
+    kind: 'continuable',
+    subagentId: child.id,
+    model: 'deep',
+  })
+
+  const waiting = wait.execute({}, execution())
+  state.emit('subagent/end', {
+    runId: 'run-snapshot',
+    provider: 'spawn',
+    id: child.id,
+    local: true,
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Snapshot-compatible result.' }],
+  })
+  assert.deepEqual(await waiting, [{
+    subagentId: child.id,
+    model: 'deep',
+    label: 'Snapshot investigation',
+    stopReason: 'completed',
+    output: [{ type: 'text', text: 'Snapshot-compatible result.' }],
+  }])
+})
+
 test('waits for model-routed background children and returns their results', async () => {
   const state = createContext()
   await apply(state.ctx)
@@ -426,20 +488,19 @@ test('waits for model-routed background children and returns their results', asy
 test('watchdog recovers a completed child after its terminal event is missed', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const children = new Map()
+  const events = [{
+    type: 'subagent/descriptor',
+    data: {
+      version: 2,
+      mode: 'continuable',
+      provider: 'spawn',
+      label: 'Watchdog investigation',
+      agentModel: 'deep',
+    },
+  }]
   const child = {
     id: 'child-watchdog',
-    session: {
-      events: [{
-        type: 'subagent/descriptor',
-        data: {
-          version: 2,
-          mode: 'continuable',
-          provider: 'spawn',
-          label: 'Watchdog investigation',
-          agentModel: 'deep',
-        },
-      }],
-    },
+    session: { snapshotEvents: () => events.slice() },
   }
   const agents = { get: (id) => children.get(id) }
   const state = createContext({
@@ -473,7 +534,7 @@ test('watchdog recovers a completed child after its terminal event is missed', a
   await new Promise((resolve) => setImmediate(resolve))
   assert.equal(finished, false)
 
-  child.session.events.push(
+  events.push(
     { type: 'turn/start', data: { turn: 0 } },
     { type: 'step/start', data: { turn: 0, step: 0 } },
     {
