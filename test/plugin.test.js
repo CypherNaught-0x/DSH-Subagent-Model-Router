@@ -233,6 +233,12 @@ function createContext(options = {}) {
     emitSessionEvent(session, event) {
       listeners.get('session/event')?.(session, event)
     },
+    runToolExecution(exec, next) {
+      const listener = listeners.get('tools/execute')
+      return listener === undefined
+        ? next()
+        : listener.call(scopeTarget(ctx.tools, exec.agent), exec, next)
+    },
     isDisposed: () => disposed,
     listeners,
     projectionDefinitions,
@@ -661,6 +667,205 @@ test('waits for standard background children when no model routes are configured
     { type: 'text', text: '\n' },
     { type: 'text', text: 'Standard investigation complete.' },
   ])
+})
+
+test('does not report empty while standard, fork, or project-agent delegation can still publish a background start', async () => {
+  for (const [index, name] of ['subagent', 'subagent_fork', 'auto_agent_run'].entries()) {
+    const parentExec = execution({ agentId: `in-flight-${index}` })
+    const state = createContext({ settings: defaultSettings })
+    await apply(state.ctx)
+    const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+    let release
+    const body = new Promise((resolve) => { release = resolve })
+    const dispatch = state.runToolExecution({
+      name,
+      arguments: { description: `${name} work` },
+      agent: parentExec.agent,
+    }, () => body)
+
+    let finished = false
+    const waiting = wait.execute({}, parentExec).then((value) => {
+      finished = true
+      return value
+    })
+    await Promise.resolve()
+    assert.equal(finished, false, `${name} must reserve the join before its lifecycle start`)
+
+    release({ isError: true, error: { message: 'not started' }, content: [] })
+    await dispatch
+    assert.deepEqual(await waiting, [])
+  }
+})
+
+test('wait includes an in-flight background start before its descriptor lookup is available', async () => {
+  const parentExec = execution({ agentId: 'racing-standard-parent' })
+  const children = new Map()
+  const child = {
+    id: 'racing-standard-child',
+    status: 'running',
+    session: {
+      header: { origin: 'subagent', parentSession: parentExec.agent.id },
+      events: [{
+        type: 'subagent/descriptor',
+        data: {
+          version: 2,
+          mode: 'continuable',
+          provider: 'spawn',
+          label: 'Racing standard child',
+        },
+      }],
+    },
+  }
+  const state = createContext({
+    settings: defaultSettings,
+    agents: {
+      get: (id) => children.get(id),
+      list: () => [...children.values()],
+    },
+  })
+  await apply(state.ctx)
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  let release
+  const body = new Promise((resolve) => { release = resolve })
+  const dispatch = state.runToolExecution({
+    name: 'subagent',
+    arguments: { description: 'Racing standard child' },
+    agent: parentExec.agent,
+  }, () => body)
+  let finished = false
+  const waiting = wait.execute({}, parentExec).then((value) => {
+    finished = true
+    return value
+  })
+  await Promise.resolve()
+  assert.equal(finished, false)
+
+  state.emit('subagent/start', {
+    runId: 'run-racing-standard',
+    provider: 'spawn',
+    id: child.id,
+    local: true,
+  }, parentExec.agent)
+  children.set(child.id, child)
+  release({
+    isError: false,
+    value: { kind: 'continuable', subagentId: child.id },
+    content: [],
+  })
+  await dispatch
+  await Promise.resolve()
+  assert.equal(finished, false)
+
+  state.emit('subagent/end', {
+    runId: 'run-racing-standard',
+    provider: 'spawn',
+    id: child.id,
+    local: true,
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Racing child complete.' }],
+  }, parentExec.agent)
+  const [result] = await waiting
+  assert.equal(result.subagentId, child.id)
+  assert.equal(result.output[0].text, 'Racing child complete.')
+})
+
+test('plugin reload discovers a genuinely running continuable child', async () => {
+  const parentExec = execution({ agentId: 'reloaded-parent' })
+  const child = {
+    id: 'resident-child',
+    status: 'running',
+    session: {
+      header: { origin: 'subagent', parentSession: parentExec.agent.id },
+      events: [{
+        type: 'subagent/descriptor',
+        data: {
+          version: 2,
+          mode: 'continuable',
+          provider: 'spawn',
+          label: 'Resident child',
+        },
+      }],
+    },
+  }
+  const state = createContext({
+    settings: defaultSettings,
+    agents: {
+      get: (id) => id === child.id ? child : undefined,
+      list: () => [parentExec.agent, child],
+    },
+  })
+  await apply(state.ctx)
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+
+  let finished = false
+  const waiting = wait.execute({}, parentExec).then((value) => {
+    finished = true
+    return value
+  })
+  await Promise.resolve()
+  assert.equal(finished, false)
+
+  state.emit('subagent/end', {
+    runId: 'run-resident-child',
+    provider: 'spawn',
+    id: child.id,
+    local: true,
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Resident child complete.' }],
+  }, parentExec.agent)
+  const [result] = await waiting
+  assert.equal(result.subagentId, child.id)
+  assert.equal(result.label, 'Resident child')
+  assert.equal(result.output[0].text, 'Resident child complete.')
+})
+
+test('plugin reload ignores an idle completed continuable child', async () => {
+  const parentExec = execution({ agentId: 'reloaded-idle-parent' })
+  const child = {
+    id: 'resident-idle-child',
+    status: 'idle',
+    session: {
+      header: { origin: 'subagent', parentSession: parentExec.agent.id },
+      events: [{
+        type: 'subagent/descriptor',
+        data: {
+          version: 2,
+          mode: 'continuable',
+          provider: 'spawn',
+          label: 'Completed resident child',
+        },
+      }, {
+        type: 'turn/start',
+        data: { turn: 1 },
+      }, {
+        type: 'turn/end',
+        data: { turn: 1, reason: { kind: 'completed' } },
+      }],
+    },
+  }
+  const state = createContext({
+    settings: defaultSettings,
+    agents: {
+      get: (id) => id === child.id ? child : undefined,
+      list: () => [parentExec.agent, child],
+    },
+  })
+  await apply(state.ctx)
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 100)
+  try {
+    assert.deepEqual(await wait.execute({}, execution({ agent: parentExec.agent, signal: controller.signal })), [])
+  } finally {
+    clearTimeout(timeout)
+  }
+})
+
+test('a truly empty wait still returns immediately', async () => {
+  const state = createContext({ settings: defaultSettings })
+  await apply(state.ctx)
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  assert.deepEqual(await wait.execute({}, execution({ agentId: 'empty-parent' })), [])
 })
 
 test('captures a child that settles before background start returns', async () => {
