@@ -3,6 +3,7 @@ import test from 'node:test'
 import { scopeTarget } from '@deepseek-ai/dsh-scope'
 import {
   apply,
+  inject,
   CATALOG_TOOL_NAME,
   CONFIG_TOOL_NAME,
   SETTINGS_NAMESPACE,
@@ -229,6 +230,9 @@ function createContext(options = {}) {
       if (parent === undefined) listener?.(info)
       else listener?.call(scopeTarget(ctx.subagents, parent), info)
     },
+    emitSessionEvent(session, event) {
+      listeners.get('session/event')?.(session, event)
+    },
     isDisposed: () => disposed,
     listeners,
     projectionDefinitions,
@@ -288,6 +292,7 @@ function execution(options = {}) {
     agent = {
       id: agentId,
       options: { provider: 'parent-provider', model: 'parent-model' },
+      session: { events: [] },
     }
     executionAgents.set(agentId, agent)
   }
@@ -298,6 +303,7 @@ function execution(options = {}) {
 }
 
 test('registers settings, setup skill, catalog, and configured model tool', async () => {
+  assert.ok(inject.includes('agents'))
   const state = createContext()
   await apply(state.ctx)
 
@@ -329,6 +335,8 @@ test('registers settings, setup skill, catalog, and configured model tool', asyn
   assert.match(sectionText, /acme\/reasoner/)
   assert.match(sectionText, /do not also perform that task yourself/)
   assert.match(sectionText, /call `wait-for-subagents`/)
+  assert.match(sectionText, /answer the steering message first/)
+  assert.match(sectionText, /does not schedule that resumed call automatically/)
 
   const result = await catalog.execute({}, execution())
   assert.deepEqual(result.current, {
@@ -485,9 +493,17 @@ test('waits for model-routed background children and returns their results', asy
   assert.deepEqual(await wait.execute({}, execution()), [])
 })
 
-test('watchdog recovers a completed child after its terminal event is missed', async (t) => {
+test('watchdog recovers the observed completion chronology while the exact child remains resumable', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const children = new Map()
+  const parentEvents = []
+  const parentExec = execution({
+    agent: {
+      id: 'watchdog-parent',
+      options: { provider: 'parent-provider', model: 'parent-model' },
+      session: { snapshotEvents: () => parentEvents.slice() },
+    },
+  })
   const events = [{
     type: 'subagent/descriptor',
     data: {
@@ -500,6 +516,7 @@ test('watchdog recovers a completed child after its terminal event is missed', a
   }]
   const child = {
     id: 'child-watchdog',
+    status: 'running',
     session: { snapshotEvents: () => events.slice() },
   }
   const agents = { get: (id) => children.get(id) }
@@ -524,9 +541,9 @@ test('watchdog recovers a completed child after its terminal event is missed', a
     model: 'deep',
     description: 'Watchdog investigation',
     prompt: 'Complete while the host is suspended.',
-  }, execution())
+  }, parentExec)
   let finished = false
-  const waiting = wait.execute({}, execution()).then((result) => {
+  const waiting = wait.execute({}, parentExec).then((result) => {
     finished = true
     return result
   })
@@ -544,7 +561,40 @@ test('watchdog recovers a completed child after its terminal event is missed', a
     { type: 'step/end', data: { turn: 0, step: 0 } },
     { type: 'turn/end', data: { turn: 0, reason: { kind: 'completed' } } },
   )
-  children.delete(child.id)
+  child.status = 'idle'
+  t.mock.timers.tick(10_000)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(finished, false, 'an idle/resumable child is not terminal proof without the manager notice')
+
+  parentEvents.push(
+    {
+      type: 'agent/inbox/spliced',
+      data: {
+        target: 'next-step',
+        start: 0,
+        inserted: [{
+          content: [{ type: 'text', text: 'Child report.' }],
+          source: { kind: 'agent-message', form: 'relay', senderSessionId: child.id },
+        }],
+      },
+    },
+    {
+      type: 'agent/inbox/spliced',
+      data: {
+        target: 'next-step',
+        start: 1,
+        inserted: [{
+          content: [{ type: 'text', text: 'Its closing message:' }],
+          source: {
+            kind: 'subagent-settled',
+            form: 'notice',
+            summary: `Background subagent ${child.id} finished and will do no further work unless you send it more.`,
+            senderSessionId: child.id,
+          },
+        }],
+      },
+    },
+  )
 
   t.mock.timers.tick(10_000)
   assert.deepEqual(await waiting, [{
@@ -643,6 +693,168 @@ test('captures a child that settles before background start returns', async () =
   }])
 })
 
+test('does not retain an unrelated ambiguous start emitted during router activation', async () => {
+  const parentExec = execution({ agentId: 'ambiguous-start-parent' })
+  const state = createContext({
+    startContinuable(spec, emit) {
+      emit('subagent/start', { runId: 'run-one-shot', id: 'one-shot', provider: spec.provider })
+      emit('subagent/start', { runId: 'run-router', id: 'child-router', provider: spec.provider })
+      return { childId: 'child-router', messageId: 'message-router' }
+    },
+  })
+  await apply(state.ctx)
+  const delegation = state.registeredTools.get('subagent_model')
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+
+  await delegation.execute({
+    model: 'deep',
+    description: 'Router child',
+    prompt: 'Track only this router-owned child.',
+  }, parentExec)
+  state.emit('subagent/end', {
+    runId: 'run-one-shot',
+    id: 'one-shot',
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Unrelated.' }],
+  })
+  state.emit('subagent/end', {
+    runId: 'run-router',
+    id: 'child-router',
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Router result.' }],
+  })
+
+  const results = await wait.execute({}, parentExec)
+  assert.deepEqual(results.map((result) => result.subagentId), ['child-router'])
+})
+
+test('promotes a provisional record when subagent/start arrives after startContinuable returns', async () => {
+  const parentExec = execution({ agentId: 'delayed-start-parent' })
+  let emitLifecycle
+  const child = {
+    session: {
+      events: [{
+        type: 'subagent/descriptor',
+        data: {
+          version: 2,
+          mode: 'continuable',
+          provider: 'spawn',
+          label: 'Delayed lifecycle',
+          agentModel: 'deep',
+        },
+      }],
+    },
+  }
+  const state = createContext({
+    agents: { get: (id) => id === 'child-delayed' ? child : undefined },
+    startContinuable(_spec, emit) {
+      emitLifecycle = emit
+      return { childId: 'child-delayed', messageId: 'message-delayed' }
+    },
+  })
+  await apply(state.ctx)
+  const delegation = state.registeredTools.get('subagent_model')
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+
+  await delegation.execute({
+    model: 'deep',
+    description: 'Delayed lifecycle',
+    prompt: 'Complete despite delayed lifecycle delivery.',
+  }, parentExec)
+  emitLifecycle('subagent/start', {
+    runId: 'run-delayed',
+    id: 'child-delayed',
+    provider: 'spawn',
+    local: true,
+  })
+  state.emit('subagent/end', {
+    runId: 'run-delayed',
+    id: 'child-delayed',
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Delayed lifecycle result.' }],
+  })
+
+  const [result] = await wait.execute({}, { ...parentExec, signal: AbortSignal.timeout(250) })
+  assert.equal(result.output[0].text, 'Delayed lifecycle result.')
+  assert.deepEqual(await wait.execute({}, parentExec), [])
+})
+
+test('binds a missed start from the exact end event and ignores a later duplicate start', async () => {
+  const parentExec = execution({ agentId: 'missed-start-parent' })
+  const child = {
+    session: {
+      events: [{
+        type: 'subagent/descriptor',
+        data: {
+          version: 2,
+          mode: 'continuable',
+          provider: 'spawn',
+          label: 'Missed start',
+          agentModel: 'deep',
+        },
+      }],
+    },
+  }
+  const state = createContext({
+    agents: { get: (id) => id === 'child-missed' ? child : undefined },
+    startContinuable() {
+      return { childId: 'child-missed', messageId: 'message-missed' }
+    },
+  })
+  await apply(state.ctx)
+  const delegation = state.registeredTools.get('subagent_model')
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+
+  await delegation.execute({
+    model: 'deep',
+    description: 'Missed start',
+    prompt: 'Complete without a delivered start event.',
+  }, parentExec)
+  state.emit('subagent/end', {
+    runId: 'run-missed',
+    id: 'child-missed',
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Recovered without start.' }],
+  })
+  const [result] = await wait.execute({}, parentExec)
+  assert.equal(result.output[0].text, 'Recovered without start.')
+
+  state.emit('subagent/start', {
+    runId: 'run-missed',
+    id: 'child-missed',
+    provider: 'spawn',
+    local: true,
+  }, parentExec.agent)
+  assert.deepEqual(await wait.execute({}, parentExec), [])
+
+  await delegation.execute({
+    model: 'deep',
+    description: 'Reused child',
+    prompt: 'Run a new activation on the reused child.',
+  }, parentExec)
+  state.emit('subagent/end', {
+    runId: 'run-missed',
+    id: 'child-missed',
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Late duplicate from the old run.' }],
+  })
+  let finished = false
+  const resumed = wait.execute({}, parentExec).then((value) => {
+    finished = true
+    return value
+  })
+  await Promise.resolve()
+  assert.equal(finished, false)
+  state.emit('subagent/end', {
+    runId: 'run-reused',
+    id: 'child-missed',
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Exact reused-child result.' }],
+  })
+  const [reused] = await resumed
+  assert.equal(reused.output[0].text, 'Exact reused-child result.')
+})
+
 test('preserves non-text child output in wait results', async () => {
   const state = createContext()
   await apply(state.ctx)
@@ -691,6 +903,14 @@ test('cancelled waits retain child results for a retry', async () => {
   const cancelled = wait.execute({}, execution({ signal: controller.signal }))
   controller.abort(new Error('stop waiting'))
   await assert.rejects(cancelled, /stop waiting/)
+  state.emitSessionEvent(execution().agent.session, {
+    type: 'agent/inbox/spliced',
+    data: {
+      target: 'next-step',
+      start: 0,
+      inserted: [{ content: [], source: { kind: 'user' } }],
+    },
+  })
 
   state.emit('subagent/end', {
     runId: 'run-child-1',
@@ -702,6 +922,164 @@ test('cancelled waits retain child results for a retry', async () => {
   })
   const [result] = await wait.execute({}, execution())
   assert.equal(result.output[0].text, 'Retry result.')
+})
+
+test('direct human steering interrupts an active wait and preserves the exact run for resumption', async () => {
+  const parentExec = execution({ agentId: 'steered-parent' })
+  const state = createContext()
+  await apply(state.ctx)
+  const delegation = state.registeredTools.get('subagent_model')
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  await delegation.execute({
+    model: 'deep',
+    description: 'Steered work',
+    prompt: 'Complete after steering.',
+  }, parentExec)
+
+  const waiting = wait.execute({}, parentExec)
+  state.emitSessionEvent(parentExec.agent.session, {
+    type: 'agent/inbox/spliced',
+    data: {
+      target: 'next-step',
+      start: 0,
+      inserted: [{ content: [{ type: 'text', text: 'Change direction.' }], source: { kind: 'user' } }],
+    },
+  })
+  const interrupted = await waiting
+  assert.deepEqual(interrupted, {
+    kind: 'interrupted',
+    pending: [{ subagentId: 'child-1', runId: 'run-child-1' }],
+  })
+  assert.match(wait.description, /answer the steering message first/)
+  assert.deepEqual(wait.output.render({}, interrupted), [{
+    type: 'text',
+    text: 'wait interrupted by direct user steering; answer the steering message now, then call wait-for-subagents again before final synthesis (1 background subagent remains joinable)',
+  }])
+
+  state.emit('subagent/end', {
+    runId: 'run-child-1',
+    provider: 'spawn',
+    id: 'child-1',
+    local: true,
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Resumed exact result.' }],
+  })
+  const [result] = await wait.execute({}, parentExec)
+  assert.equal(result.output[0].text, 'Resumed exact result.')
+  assert.deepEqual(await wait.execute({}, parentExec), [])
+})
+
+test('steering and completion races retain the terminal result for the next wait', async () => {
+  const parentExec = execution({ agentId: 'racing-parent' })
+  const state = createContext()
+  await apply(state.ctx)
+  const delegation = state.registeredTools.get('subagent_model')
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  await delegation.execute({
+    model: 'deep',
+    description: 'Racing work',
+    prompt: 'Finish concurrently with steering.',
+  }, parentExec)
+
+  const waiting = wait.execute({}, parentExec)
+  state.emitSessionEvent(parentExec.agent.session, {
+    type: 'agent/inbox/spliced',
+    data: {
+      target: 'next-step',
+      start: 0,
+      inserted: [{ content: [{ type: 'text', text: 'Steer now.' }], source: { kind: 'user' } }],
+    },
+  })
+  state.emit('subagent/end', {
+    runId: 'run-child-1',
+    provider: 'spawn',
+    id: 'child-1',
+    local: true,
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Raced result.' }],
+  })
+
+  assert.equal((await waiting).kind, 'interrupted')
+  const [result] = await wait.execute({}, parentExec)
+  assert.equal(result.output[0].text, 'Raced result.')
+})
+
+test('wait ignores non-direct steering and stale run completions', async () => {
+  const parentExec = execution({ agentId: 'filtered-parent' })
+  const state = createContext()
+  await apply(state.ctx)
+  const delegation = state.registeredTools.get('subagent_model')
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  await delegation.execute({
+    model: 'deep',
+    description: 'Identity-bound work',
+    prompt: 'Ignore unrelated lifecycle events.',
+  }, parentExec)
+
+  state.emitSessionEvent(parentExec.agent.session, {
+    type: 'agent/inbox/spliced',
+    data: {
+      target: 'next-step',
+      start: 0,
+      inserted: [{ content: [], source: { kind: 'user' } }],
+    },
+  })
+
+  let finished = false
+  const waiting = wait.execute({}, parentExec).then((value) => {
+    finished = true
+    return value
+  })
+  state.emitSessionEvent({}, {
+    type: 'agent/inbox/spliced',
+    data: {
+      target: 'next-step',
+      start: 0,
+      inserted: [{ content: [], source: { kind: 'user' } }],
+    },
+  })
+  state.emitSessionEvent(parentExec.agent.session, {
+    type: 'agent/inbox/spliced',
+    data: {
+      target: 'next-turn',
+      start: 0,
+      inserted: [{ content: [], source: { kind: 'user' } }],
+    },
+  })
+  state.emitSessionEvent(parentExec.agent.session, {
+    type: 'agent/inbox/spliced',
+    data: {
+      target: 'next-step',
+      start: 0,
+      inserted: [{ content: [], source: { kind: 'model' } }],
+    },
+  })
+  state.emitSessionEvent(parentExec.agent.session, {
+    type: 'agent/inbox/spliced',
+    data: {
+      target: 'next-step',
+      start: 0,
+      outcome: 'canceled',
+      inserted: [{ content: [], source: { kind: 'user' } }],
+    },
+  })
+  state.emit('subagent/end', {
+    runId: 'stale-run',
+    id: 'child-1',
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Stale result.' }],
+  })
+  await Promise.resolve()
+  assert.equal(finished, false)
+
+  state.emit('subagent/end', {
+    runId: 'run-child-1',
+    id: 'child-1',
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Identity-bound result.' }],
+  })
+  const [result] = await waiting
+  assert.equal(result.output[0].text, 'Identity-bound result.')
 })
 
 test('parent disposal releases tracked children and active waits', async () => {
@@ -732,7 +1110,7 @@ test('disposing an old same-id agent does not clear replacement tracking', async
   const delegation = state.registeredTools.get('subagent_model')
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   const oldAgent = { id: 'reused-parent', options: {} }
-  const replacement = { id: 'reused-parent', options: {} }
+  const replacement = { id: 'reused-parent', options: {}, session: { events: [] } }
   await delegation.execute({
     model: 'deep',
     description: 'Replacement work',
