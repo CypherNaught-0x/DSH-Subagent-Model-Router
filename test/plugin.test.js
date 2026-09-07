@@ -341,6 +341,8 @@ test('registers settings, setup skill, catalog, and configured model tool', asyn
   assert.match(sectionText, /acme\/reasoner/)
   assert.match(sectionText, /do not also perform that task yourself/)
   assert.match(sectionText, /call `wait-for-subagents`/)
+  assert.match(sectionText, /While a same-session completion goal is active, do not merely state that another model is handling the task and end your turn while background subagents remain outstanding\./)
+  assert.match(sectionText, /Ending the turn triggers immediate goal continuation and can race child tracking; call `wait-for-subagents` to join the outstanding work, then synthesize the results and continue or complete the goal\./)
   assert.match(sectionText, /answer the steering message first/)
   assert.match(sectionText, /does not schedule that resumed call automatically/)
 
