@@ -33,6 +33,37 @@ const defaultSettings = {
   models: [],
 }
 
+function expectedSettlementSummaryForTest(childId, stopReason) {
+  const subject = `Background subagent ${childId}`
+  switch (stopReason) {
+    case 'completed': return `${subject} finished and will do no further work unless you send it more.`
+    case 'aborted': return `${subject} was stopped before it finished.`
+    case 'max-tokens': return `${subject} ran out of room before it finished.`
+    case 'refusal': return `${subject} declined the task.`
+    case 'error': return `${subject} failed before it finished.`
+    default: throw new Error(`unsupported test stop reason ${stopReason}`)
+  }
+}
+
+function settlementNoticeForTest(childId, stopReason) {
+  return {
+    type: 'agent/inbox/spliced',
+    data: {
+      target: 'next-step',
+      start: 0,
+      inserted: [{
+        content: [],
+        source: {
+          kind: 'subagent-settled',
+          form: 'notice',
+          summary: expectedSettlementSummaryForTest(childId, stopReason),
+          senderSessionId: childId,
+        },
+      }],
+    },
+  }
+}
+
 function createContext(options = {}) {
   const registeredTools = new Map()
   if (options.existingWaitTool !== undefined) {
@@ -225,6 +256,11 @@ function createContext(options = {}) {
     ctx,
     continuableStarts,
     effects,
+    disposeEffects() {
+      for (const dispose of effects.toReversed()) {
+        if (typeof dispose === 'function') dispose()
+      }
+    },
     emit(event, info, parent) {
       const listener = listeners.get(event)
       if (parent === undefined) listener?.(info)
@@ -614,6 +650,668 @@ test('watchdog recovers the observed completion chronology while the exact child
   }])
 })
 
+test('settlement notice immediately recovers a discovered child when subagent/end was missed', async () => {
+  const parentEvents = []
+  const parentExec = execution({
+    agent: {
+      id: 'reloaded-missed-end-parent',
+      options: { provider: 'parent-provider', model: 'parent-model' },
+      session: { snapshotEvents: () => parentEvents.slice() },
+    },
+  })
+  const childEvents = [{
+    type: 'subagent/descriptor',
+    data: {
+      version: 3,
+      mode: 'continuable',
+      provider: 'spawn',
+      label: 'Reloaded verifier',
+      agentProvider: 'acme',
+      agentModel: 'reasoner',
+    },
+  }]
+  const child = {
+    id: 'reloaded-missed-end-child',
+    status: 'running',
+    session: {
+      header: { origin: 'subagent', parentSession: parentExec.agent.id },
+      snapshotEvents: () => childEvents.slice(),
+    },
+  }
+  const state = createContext({
+    settings: defaultSettings,
+    agents: {
+      get: (id) => id === child.id ? child : undefined,
+      list: () => [parentExec.agent, child],
+    },
+  })
+  await apply(state.ctx)
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+
+  let finished = false
+  const waiting = wait.execute({}, parentExec).then((value) => {
+    finished = true
+    return value
+  })
+  await Promise.resolve()
+  assert.equal(finished, false)
+
+  childEvents.push(
+    { type: 'turn/start', data: { turn: 8 } },
+    { type: 'step/start', data: { turn: 8, step: 0 } },
+    {
+      type: 'assistant/message',
+      data: { message: { content: [{ type: 'text', text: 'Reloaded verifier complete.' }] } },
+    },
+    { type: 'step/end', data: { turn: 8, step: 0 } },
+    { type: 'turn/end', data: { turn: 8, reason: { kind: 'completed' } } },
+  )
+  child.status = 'idle'
+  const notice = {
+    type: 'agent/inbox/spliced',
+    data: {
+      target: 'next-step',
+      start: 0,
+      inserted: [{
+        content: [{ type: 'text', text: 'Reloaded verifier complete.' }],
+        source: {
+          kind: 'subagent-settled',
+          form: 'notice',
+          summary: `Background subagent ${child.id} finished and will do no further work unless you send it more.`,
+          senderSessionId: child.id,
+        },
+      }],
+    },
+  }
+  parentEvents.push(notice)
+  state.emitSessionEvent(parentExec.agent.session, notice)
+
+  assert.deepEqual(await waiting, [{
+    subagentId: child.id,
+    model: 'reasoner',
+    label: 'Reloaded verifier',
+    stopReason: 'completed',
+    output: [{ type: 'text', text: 'Reloaded verifier complete.' }],
+  }])
+  assert.deepEqual(await wait.execute({}, parentExec), [])
+})
+
+test('watchdog recovers a discovered child when both terminal lifecycle events were missed', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const parentEvents = []
+  const parentExec = execution({
+    agent: {
+      id: 'cold-watchdog-parent',
+      options: {},
+      session: { snapshotEvents: () => parentEvents.slice() },
+    },
+  })
+  const childEvents = [{
+    type: 'subagent/descriptor',
+    data: { version: 3, mode: 'continuable', provider: 'spawn', label: 'Cold child' },
+  }]
+  const child = {
+    id: 'cold-watchdog-child',
+    status: 'running',
+    session: {
+      header: { origin: 'subagent', parentSession: parentExec.agent.id },
+      snapshotEvents: () => childEvents.slice(),
+    },
+  }
+  const state = createContext({
+    settings: defaultSettings,
+    agents: {
+      get: (id) => id === child.id ? child : undefined,
+      list: () => [child],
+    },
+  })
+  await apply(state.ctx)
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  const waiting = wait.execute({}, parentExec)
+  await Promise.resolve()
+
+  childEvents.push(
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'step/start', data: { turn: 1, step: 0 } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'Cold result.' }] } } },
+    { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+  )
+  parentEvents.push({
+    type: 'agent/inbox/spliced',
+    data: {
+      target: 'next-step',
+      start: 0,
+      inserted: [{
+        content: [],
+        source: {
+          kind: 'subagent-settled',
+          form: 'notice',
+          summary: `Background subagent ${child.id} finished and will do no further work unless you send it more.`,
+          senderSessionId: child.id,
+        },
+      }],
+    },
+  })
+  child.status = 'idle'
+  t.mock.timers.tick(10_000)
+
+  assert.deepEqual(await waiting, [{
+    subagentId: child.id,
+    label: 'Cold child',
+    stopReason: 'completed',
+    output: [{ type: 'text', text: 'Cold result.' }],
+  }])
+})
+
+test('auto_agent_run missed end reconciles without joining stale idle children', async () => {
+  const parentEvents = []
+  const parentExec = execution({
+    agent: {
+      id: 'project-agent-parent',
+      options: {},
+      session: { snapshotEvents: () => parentEvents.slice() },
+    },
+  })
+  const stale = {
+    id: 'stale-ready-child',
+    status: 'ready',
+    session: {
+      header: { origin: 'subagent', parentSession: parentExec.agent.id },
+      events: [{ type: 'subagent/descriptor', data: { version: 3, mode: 'continuable', provider: 'spawn', label: 'Stale' } }],
+    },
+  }
+  const childEvents = [{
+    type: 'subagent/descriptor',
+    data: { version: 3, mode: 'continuable', provider: 'spawn', label: 'Project verifier' },
+  }]
+  const child = {
+    id: 'project-verifier-child',
+    status: 'running',
+    session: {
+      header: { origin: 'subagent', parentSession: parentExec.agent.id },
+      snapshotEvents: () => childEvents.slice(),
+    },
+  }
+  const children = new Map([[stale.id, stale]])
+  const state = createContext({
+    settings: defaultSettings,
+    agents: {
+      get: (id) => children.get(id),
+      list: () => [stale, ...(children.has(child.id) ? [child] : [])],
+    },
+  })
+  await apply(state.ctx)
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  let release
+  const dispatch = state.runToolExecution({
+    name: 'auto_agent_run',
+    arguments: { agent_id: 'reviewer', task: 'Verify lifecycle.', run_in_background: true },
+    agent: parentExec.agent,
+  }, () => new Promise((resolve) => { release = resolve }))
+
+  state.emit('subagent/start', {
+    runId: 'run-project-verifier',
+    provider: 'spawn',
+    id: child.id,
+    local: true,
+  }, parentExec.agent)
+  children.set(child.id, child)
+  release({
+    isError: false,
+    value: { kind: 'background', agentId: 'reviewer', subagentId: child.id },
+    content: [],
+  })
+  await dispatch
+  const waiting = wait.execute({}, parentExec)
+
+  childEvents.push(
+    { type: 'turn/start', data: { turn: 2 } },
+    { type: 'step/start', data: { turn: 2, step: 0 } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'Project verification done.' }] } } },
+    { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } },
+  )
+  const notice = {
+    type: 'agent/inbox/spliced',
+    data: {
+      target: 'next-step',
+      start: 0,
+      inserted: [{
+        content: [],
+        source: {
+          kind: 'subagent-settled',
+          form: 'notice',
+          summary: `Background subagent ${child.id} finished and will do no further work unless you send it more.`,
+          senderSessionId: child.id,
+        },
+      }],
+    },
+  }
+  parentEvents.push(notice)
+  child.status = 'idle'
+  state.emitSessionEvent(parentExec.agent.session, notice)
+
+  const results = await waiting
+  assert.deepEqual(results.map((result) => result.subagentId), [child.id])
+  assert.equal(results[0].output[0].text, 'Project verification done.')
+})
+
+test('pre-boundary completion evidence cannot settle a newly discovered activation', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const childId = 'reused-resident-child'
+  const oldNotice = {
+    type: 'agent/inbox/spliced',
+    data: {
+      target: 'next-step',
+      start: 0,
+      inserted: [{
+        content: [],
+        source: {
+          kind: 'subagent-settled',
+          form: 'notice',
+          summary: `Background subagent ${childId} finished and will do no further work unless you send it more.`,
+          senderSessionId: childId,
+        },
+      }],
+    },
+  }
+  const parentEvents = [oldNotice]
+  const parentExec = execution({ agent: { id: 'reused-resident-parent', options: {}, session: { events: parentEvents } } })
+  const childEvents = [
+    { type: 'subagent/descriptor', data: { version: 3, mode: 'continuable', provider: 'spawn', label: 'Reused resident' } },
+    { type: 'turn/start', data: { turn: 0 } },
+    { type: 'step/start', data: { turn: 0, step: 0 } },
+    { type: 'turn/end', data: { turn: 0, reason: { kind: 'completed' } } },
+  ]
+  const child = {
+    id: childId,
+    status: 'running',
+    session: { header: { origin: 'subagent', parentSession: parentExec.agent.id }, events: childEvents },
+  }
+  const state = createContext({
+    settings: defaultSettings,
+    agents: { get: () => child, list: () => [child] },
+  })
+  await apply(state.ctx)
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  let finished = false
+  const waiting = wait.execute({}, parentExec).then((value) => {
+    finished = true
+    return value
+  })
+  t.mock.timers.tick(10_000)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(finished, false)
+
+  childEvents.push(
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'step/start', data: { turn: 1, step: 0 } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'Fresh activation.' }] } } },
+    { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+  )
+  const freshNotice = structuredClone(oldNotice)
+  parentEvents.push(freshNotice)
+  state.emitSessionEvent(parentExec.agent.session, freshNotice)
+  assert.equal((await waiting)[0].output[0].text, 'Fresh activation.')
+})
+
+test('reload discovery recovers when the observed running child already logged its terminal turn', async () => {
+  const childId = 'terminal-at-discovery-child'
+  const terminalOutput = [{ type: 'text', text: 'Already terminal when discovered.' }]
+  const childEvents = [
+    { type: 'subagent/descriptor', data: { version: 3, mode: 'continuable', provider: 'spawn', label: 'Terminal at discovery' } },
+    { type: 'turn/start', data: { turn: 4 } },
+    { type: 'step/start', data: { turn: 4, step: 0 } },
+    { type: 'assistant/message', data: { message: { content: terminalOutput } } },
+    { type: 'step/end', data: { turn: 4, step: 0 } },
+    { type: 'turn/end', data: { turn: 4, reason: { kind: 'completed' } } },
+  ]
+  const parentEvents = []
+  const parentExec = execution({
+    agent: {
+      id: 'terminal-at-discovery-parent',
+      options: {},
+      session: { snapshotEvents: () => parentEvents.slice() },
+    },
+  })
+  const child = {
+    id: childId,
+    status: 'running',
+    session: {
+      header: { origin: 'subagent', parentSession: parentExec.agent.id },
+      firstLiveSeq: 1,
+      snapshotEvents: () => childEvents.slice(),
+    },
+  }
+  const state = createContext({
+    settings: defaultSettings,
+    agents: {
+      get: (id) => id === childId ? child : undefined,
+      list: () => [child],
+    },
+  })
+  await apply(state.ctx)
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  const waiting = wait.execute({}, { ...parentExec, signal: AbortSignal.timeout(250) })
+  await Promise.resolve()
+
+  const notice = {
+    type: 'agent/inbox/spliced',
+    data: {
+      target: 'next-step',
+      start: 0,
+      inserted: [{
+        content: [],
+        source: {
+          kind: 'subagent-settled',
+          form: 'notice',
+          summary: `Background subagent ${childId} finished and will do no further work unless you send it more.`,
+          senderSessionId: childId,
+        },
+      }],
+    },
+  }
+  parentEvents.push(notice)
+  child.status = 'idle'
+  state.emitSessionEvent(parentExec.agent.session, notice)
+
+  assert.deepEqual(await waiting, [{
+    subagentId: childId,
+    label: 'Terminal at discovery',
+    stopReason: 'completed',
+    output: terminalOutput,
+  }])
+})
+
+test('settlement notice immediately reconciles a child first published without a readable Agent', async () => {
+  const childId = 'late-readable-child'
+  const parentEvents = []
+  const parentExec = execution({
+    agent: {
+      id: 'late-readable-parent',
+      options: {},
+      session: { snapshotEvents: () => parentEvents.slice() },
+    },
+  })
+  const children = new Map()
+  const state = createContext({
+    settings: defaultSettings,
+    agents: { get: (id) => children.get(id), list: () => [...children.values()] },
+  })
+  await apply(state.ctx)
+  await state.runToolExecution({
+    name: 'subagent',
+    arguments: { description: 'Late readable child' },
+    agent: parentExec.agent,
+  }, async () => ({
+    isError: false,
+    value: { kind: 'continuable', subagentId: childId },
+    content: [],
+  }))
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  const waiting = wait.execute({}, { ...parentExec, signal: AbortSignal.timeout(500) })
+  await Promise.resolve()
+
+  const childEvents = [
+    { type: 'subagent/descriptor', data: { version: 3, mode: 'continuable', provider: 'spawn', label: 'Late readable child' } },
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'step/start', data: { turn: 1, step: 0 } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'Late readable result.' }] } } },
+    { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+  ]
+  children.set(childId, {
+    id: childId,
+    status: 'idle',
+    session: {
+      header: { origin: 'subagent', parentSession: parentExec.agent.id },
+      firstLiveSeq: 1,
+      snapshotEvents: () => childEvents.slice(),
+    },
+  })
+  const notice = {
+    type: 'agent/inbox/spliced',
+    data: {
+      target: 'next-step',
+      start: 0,
+      inserted: [{
+        content: [],
+        source: {
+          kind: 'subagent-settled',
+          form: 'notice',
+          summary: `Background subagent ${childId} finished and will do no further work unless you send it more.`,
+          senderSessionId: childId,
+        },
+      }],
+    },
+  }
+  parentEvents.push(notice)
+  state.emitSessionEvent(parentExec.agent.session, notice)
+
+  assert.equal((await waiting)[0].output[0].text, 'Late readable result.')
+})
+
+test('reload reconciliation uses the latest turn from a repeated-turn resident Agent', async () => {
+  const childId = 'repeated-turn-child'
+  const childEvents = [{
+    type: 'subagent/descriptor',
+    data: { version: 3, mode: 'continuable', provider: 'spawn', label: 'Repeated turns' },
+  }]
+  const parentEvents = []
+  const parentExec = execution({
+    agent: {
+      id: 'repeated-turn-parent',
+      options: {},
+      session: { snapshotEvents: () => parentEvents.slice() },
+    },
+  })
+  const child = {
+    id: childId,
+    status: 'running',
+    session: {
+      header: { origin: 'subagent', parentSession: parentExec.agent.id },
+      firstLiveSeq: 1,
+      snapshotEvents: () => childEvents.slice(),
+    },
+  }
+  const state = createContext({
+    settings: defaultSettings,
+    agents: { get: () => child, list: () => [child] },
+  })
+  await apply(state.ctx)
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  let finished = false
+  const waiting = wait.execute({}, { ...parentExec, signal: AbortSignal.timeout(500) }).then((value) => {
+    finished = true
+    return value
+  })
+  await Promise.resolve()
+
+  childEvents.push(
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'step/start', data: { turn: 1, step: 0 } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'First turn.' }] } } },
+    { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+    { type: 'turn/start', data: { turn: 2 } },
+    { type: 'step/start', data: { turn: 2, step: 0 } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'Second and final turn.' }] } } },
+    { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } },
+  )
+  await Promise.resolve()
+  assert.equal(finished, false, 'turn completion alone is not activation settlement')
+
+  const notice = {
+    type: 'agent/inbox/spliced',
+    data: {
+      target: 'next-step',
+      start: 0,
+      inserted: [{
+        content: [],
+        source: {
+          kind: 'subagent-settled',
+          form: 'notice',
+          summary: `Background subagent ${childId} finished and will do no further work unless you send it more.`,
+          senderSessionId: childId,
+        },
+      }],
+    },
+  }
+  parentEvents.push(notice)
+  state.emitSessionEvent(parentExec.agent.session, notice)
+
+  const [result] = await waiting
+  assert.deepEqual(result.output, [{ type: 'text', text: 'Second and final turn.' }])
+})
+
+test('malformed recovery history for one child does not starve an independent child', async () => {
+  const parentEvents = []
+  const parentExec = execution({
+    agent: {
+      id: 'fault-isolation-parent',
+      options: {},
+      session: { snapshotEvents: () => parentEvents.slice() },
+    },
+  })
+  const malformed = {
+    id: 'malformed-history-child',
+    status: 'running',
+    session: {
+      header: { origin: 'subagent', parentSession: parentExec.agent.id },
+      events: [{ type: 'subagent/descriptor', data: { version: 3, mode: 'continuable', provider: 'spawn', label: 'Malformed' } }],
+    },
+  }
+  const healthy = {
+    id: 'healthy-history-child',
+    status: 'running',
+    session: {
+      header: { origin: 'subagent', parentSession: parentExec.agent.id },
+      events: [{ type: 'subagent/descriptor', data: { version: 3, mode: 'continuable', provider: 'spawn', label: 'Healthy' } }],
+    },
+  }
+  const children = new Map([[malformed.id, malformed], [healthy.id, healthy]])
+  const state = createContext({
+    settings: defaultSettings,
+    agents: { get: (id) => children.get(id), list: () => [...children.values()] },
+  })
+  await apply(state.ctx)
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  const waiting = wait.execute({}, { ...parentExec, signal: AbortSignal.timeout(500) })
+  await Promise.resolve()
+
+  malformed.session.events.push({ type: 'turn/end' })
+  healthy.session.events.push(
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'step/start', data: { turn: 1, step: 0 } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'Healthy recovery.' }] } } },
+    { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+  )
+  const noticeFor = (childId) => ({
+    content: [],
+    source: {
+      kind: 'subagent-settled',
+      form: 'notice',
+      summary: `Background subagent ${childId} finished and will do no further work unless you send it more.`,
+      senderSessionId: childId,
+    },
+  })
+  const notice = {
+    type: 'agent/inbox/spliced',
+    data: {
+      target: 'next-step',
+      start: 0,
+      inserted: [noticeFor(malformed.id), noticeFor(healthy.id)],
+    },
+  }
+  parentEvents.push(notice)
+  assert.doesNotThrow(() => state.emitSessionEvent(parentExec.agent.session, notice))
+
+  state.emit('subagent/end', {
+    runId: 'malformed-run',
+    id: malformed.id,
+    stopReason: 'error',
+    lastAssistantMessage: [],
+  })
+  const results = await waiting
+  assert.equal(results.find((result) => result.subagentId === healthy.id).output[0].text, 'Healthy recovery.')
+  assert.equal(results.find((result) => result.subagentId === malformed.id).stopReason, 'error')
+})
+
+test('settlement notice reconciliation remains isolated between independent parents', async () => {
+  const makeParent = (id) => {
+    const events = []
+    return {
+      events,
+      exec: execution({ agent: { id, options: {}, session: { snapshotEvents: () => events.slice() } } }),
+    }
+  }
+  const leftParent = makeParent('independent-left-parent')
+  const rightParent = makeParent('independent-right-parent')
+  const makeChild = (id, parent, label) => {
+    const events = [{ type: 'subagent/descriptor', data: { version: 3, mode: 'continuable', provider: 'spawn', label } }]
+    return {
+      events,
+      agent: {
+        id,
+        status: 'running',
+        session: {
+          header: { origin: 'subagent', parentSession: parent.exec.agent.id },
+          snapshotEvents: () => events.slice(),
+        },
+      },
+    }
+  }
+  const left = makeChild('independent-left-child', leftParent, 'Left child')
+  const right = makeChild('independent-right-child', rightParent, 'Right child')
+  const state = createContext({
+    settings: defaultSettings,
+    agents: {
+      get: (id) => [left.agent, right.agent].find((agent) => agent.id === id),
+      list: () => [left.agent, right.agent],
+    },
+  })
+  await apply(state.ctx)
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  let rightFinished = false
+  const leftWaiting = wait.execute({}, { ...leftParent.exec, signal: AbortSignal.timeout(500) })
+  const rightWaiting = wait.execute({}, { ...rightParent.exec, signal: AbortSignal.timeout(500) }).then((value) => {
+    rightFinished = true
+    return value
+  })
+  await Promise.resolve()
+
+  const complete = (child, parent, text) => {
+    child.events.push(
+      { type: 'turn/start', data: { turn: 1 } },
+      { type: 'step/start', data: { turn: 1, step: 0 } },
+      { type: 'assistant/message', data: { message: { content: [{ type: 'text', text }] } } },
+      { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+    )
+    const notice = {
+      type: 'agent/inbox/spliced',
+      data: {
+        target: 'next-step',
+        start: parent.events.length,
+        inserted: [{
+          content: [],
+          source: {
+            kind: 'subagent-settled',
+            form: 'notice',
+            summary: `Background subagent ${child.agent.id} finished and will do no further work unless you send it more.`,
+            senderSessionId: child.agent.id,
+          },
+        }],
+      },
+    }
+    parent.events.push(notice)
+    state.emitSessionEvent(parent.exec.agent.session, notice)
+  }
+
+  complete(left, leftParent, 'Left result.')
+  assert.equal((await leftWaiting)[0].output[0].text, 'Left result.')
+  await Promise.resolve()
+  assert.equal(rightFinished, false)
+  complete(right, rightParent, 'Right result.')
+  assert.equal((await rightWaiting)[0].output[0].text, 'Right result.')
+})
+
 test('waits for standard background children when no model routes are configured', async () => {
   const parentExec = execution({ agentId: 'standard-parent' })
   const state = createContext({
@@ -769,6 +1467,196 @@ test('wait includes an in-flight background start before its descriptor lookup i
   const [result] = await waiting
   assert.equal(result.subagentId, child.id)
   assert.equal(result.output[0].text, 'Racing child complete.')
+})
+
+test('plugin reload reports an interrupted idle child with parked input and preserves it for resume', async () => {
+  const parentExec = execution({ agentId: 'parked-reload-parent' })
+  const childEvents = [
+    { type: 'subagent/descriptor', data: { version: 3, mode: 'continuable', provider: 'spawn', label: 'Parked child' } },
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'step/start', data: { turn: 1, step: 0 } },
+    { type: 'turn/end', data: { turn: 1, reason: { kind: 'aborted' } } },
+  ]
+  const inbox = { hasPending: true, nextTurn: [], nextStep: [{ id: 'parked-message' }] }
+  const child = {
+    id: 'parked-reload-child',
+    status: 'idle',
+    inbox,
+    session: {
+      header: { origin: 'subagent', parentSession: parentExec.agent.id },
+      firstLiveSeq: 1,
+      snapshotEvents: () => childEvents.slice(),
+    },
+  }
+  const state = createContext({
+    settings: defaultSettings,
+    agents: {
+      get: (id) => id === child.id ? child : undefined,
+      list: () => [child],
+    },
+  })
+  await apply(state.ctx)
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+
+  const paused = await wait.execute({}, { ...parentExec, signal: AbortSignal.timeout(500) })
+  assert.deepEqual(paused, {
+    kind: 'paused',
+    pending: [{ subagentId: child.id }],
+    paused: [{ subagentId: child.id }],
+  })
+  assert.match(wait.output.render({}, paused)[0].text, /call send_message.*then call wait-for-subagents again/)
+
+  child.status = 'running'
+  inbox.hasPending = false
+  inbox.nextStep = []
+  const resumed = wait.execute({}, { ...parentExec, signal: AbortSignal.timeout(500) })
+  state.emit('subagent/end', {
+    runId: 'parked-resumed-run',
+    id: child.id,
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Parked child resumed and finished.' }],
+  })
+  assert.equal((await resumed)[0].output[0].text, 'Parked child resumed and finished.')
+  child.status = 'idle'
+  assert.deepEqual(await wait.execute({}, parentExec), [])
+})
+
+test('an active wait reports a child that becomes idle with parked input', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const parentExec = execution({ agentId: 'late-parked-parent' })
+  const childEvents = [{
+    type: 'subagent/descriptor',
+    data: { version: 3, mode: 'continuable', provider: 'spawn', label: 'Late parked child' },
+  }]
+  const inbox = { hasPending: false, nextTurn: [], nextStep: [] }
+  const child = {
+    id: 'late-parked-child',
+    status: 'running',
+    inbox,
+    session: {
+      header: { origin: 'subagent', parentSession: parentExec.agent.id },
+      firstLiveSeq: 1,
+      snapshotEvents: () => childEvents.slice(),
+    },
+  }
+  const state = createContext({
+    settings: defaultSettings,
+    agents: { get: () => child, list: () => [child] },
+  })
+  await apply(state.ctx)
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  const waiting = wait.execute({}, parentExec)
+  await new Promise((resolve) => setImmediate(resolve))
+
+  childEvents.push(
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'step/start', data: { turn: 1, step: 0 } },
+    { type: 'turn/end', data: { turn: 1, reason: { kind: 'aborted' } } },
+  )
+  child.status = 'idle'
+  inbox.hasPending = true
+  inbox.nextStep = [{}]
+  t.mock.timers.tick(10_000)
+
+  const paused = await waiting
+  assert.equal(paused.kind, 'paused')
+  assert.deepEqual(paused.paused, [{ subagentId: child.id }])
+
+  child.status = 'running'
+  inbox.hasPending = false
+  inbox.nextStep = []
+  const resumed = wait.execute({}, parentExec)
+  state.emit('subagent/end', {
+    runId: 'late-parked-run',
+    id: child.id,
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Late parked child complete.' }],
+  })
+  assert.equal((await resumed)[0].output[0].text, 'Late parked child complete.')
+})
+
+test('an already-aborted wait rejects instead of returning an initial paused outcome', async () => {
+  const parentExec = execution({ agentId: 'aborted-paused-parent' })
+  const child = {
+    id: 'aborted-paused-child',
+    status: 'idle',
+    inbox: { hasPending: true, nextTurn: [], nextStep: [{}] },
+    session: {
+      header: { origin: 'subagent', parentSession: parentExec.agent.id },
+      firstLiveSeq: 1,
+      events: [
+        { type: 'subagent/descriptor', data: { version: 3, mode: 'continuable', provider: 'spawn', label: 'Aborted paused child' } },
+        { type: 'turn/start', data: { turn: 1 } },
+        { type: 'step/start', data: { turn: 1, step: 0 } },
+        { type: 'turn/end', data: { turn: 1, reason: { kind: 'aborted' } } },
+      ],
+    },
+  }
+  const state = createContext({
+    settings: defaultSettings,
+    agents: { get: () => child, list: () => [child] },
+  })
+  await apply(state.ctx)
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  const controller = new AbortController()
+  controller.abort(new Error('cancel paused wait'))
+  await assert.rejects(wait.execute({}, execution({ agent: parentExec.agent, signal: controller.signal })), /cancel paused wait/)
+
+  child.status = 'running'
+  child.inbox.hasPending = false
+  const resumed = wait.execute({}, parentExec)
+  state.emit('subagent/end', {
+    runId: 'aborted-paused-run',
+    id: child.id,
+    stopReason: 'aborted',
+    lastAssistantMessage: [],
+  })
+  assert.equal((await resumed)[0].stopReason, 'aborted')
+})
+
+test('parked detection excludes running, no-pending, and cleanly completed idle children', async () => {
+  const parentExec = execution({ agentId: 'parked-negative-parent' })
+  const makeChild = (id, status, hasPending, reason) => ({
+    id,
+    status,
+    inbox: { hasPending, nextTurn: [], nextStep: hasPending ? [{}] : [] },
+    session: {
+      header: { origin: 'subagent', parentSession: parentExec.agent.id },
+      firstLiveSeq: 1,
+      events: [
+        { type: 'subagent/descriptor', data: { version: 3, mode: 'continuable', provider: 'spawn', label: id } },
+        { type: 'turn/start', data: { turn: 1 } },
+        { type: 'step/start', data: { turn: 1, step: 0 } },
+        { type: 'turn/end', data: { turn: 1, reason: { kind: reason } } },
+      ],
+    },
+  })
+  const noPending = makeChild('idle-no-pending', 'idle', false, 'aborted')
+  const completed = makeChild('idle-completed-pending', 'idle', true, 'completed')
+  const running = makeChild('running-pending', 'running', true, 'aborted')
+  const children = [noPending, completed, running]
+  const state = createContext({
+    settings: defaultSettings,
+    agents: {
+      get: (id) => children.find((child) => child.id === id),
+      list: () => children,
+    },
+  })
+  await apply(state.ctx)
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  const controller = new AbortController()
+  const waiting = wait.execute({}, execution({ agent: parentExec.agent, signal: controller.signal }))
+  await new Promise((resolve) => setImmediate(resolve))
+  controller.abort(new Error('bounded negative parked check'))
+  await assert.rejects(waiting, /bounded negative parked check/)
+
+  state.emit('subagent/end', {
+    runId: 'running-pending-run',
+    id: running.id,
+    stopReason: 'aborted',
+    lastAssistantMessage: [],
+  })
+  assert.equal((await wait.execute({}, parentExec))[0].subagentId, running.id)
 })
 
 test('plugin reload discovers a genuinely running continuable child', async () => {
@@ -1287,6 +2175,264 @@ test('wait ignores non-direct steering and stale run completions', async () => {
   })
   const [result] = await waiting
   assert.equal(result.output[0].text, 'Identity-bound result.')
+})
+
+test('recovery matches the continuation terminal-reason matrix and withholds teardown-failure output', async () => {
+  const cases = [
+    { name: 'completed', turnReason: 'completed', noticeReason: 'completed', expected: 'completed' },
+    { name: 'completed then queued work discarded', turnReason: 'completed', droppedUnrun: true, noticeReason: 'aborted', expected: 'aborted' },
+    { name: 'max tokens', turnReason: 'max-tokens', noticeReason: 'max-tokens', expected: 'max-tokens' },
+    { name: 'interrupted', turnReason: 'interrupted', noticeReason: 'aborted', expected: 'aborted' },
+    { name: 'aborted', turnReason: 'aborted', noticeReason: 'aborted', expected: 'aborted' },
+    { name: 'blocked', turnReason: 'blocked', noticeReason: 'refusal', expected: 'refusal' },
+    { name: 'error', turnReason: 'error', noticeReason: 'error', expected: 'error' },
+    { name: 'teardown failure', turnReason: 'completed', noticeReason: 'error', expected: 'error', outputWithheld: true },
+  ]
+  for (const [index, entry] of cases.entries()) {
+    const childId = `terminal-matrix-child-${index}`
+    const parentEvents = []
+    const parentExec = execution({
+      agent: {
+        id: `terminal-matrix-parent-${index}`,
+        options: {},
+        session: { snapshotEvents: () => parentEvents.slice() },
+      },
+    })
+    const childEvents = [{
+      type: 'subagent/descriptor',
+      data: { version: 3, mode: 'continuable', provider: 'spawn', label: entry.name },
+    }]
+    const child = {
+      id: childId,
+      status: 'running',
+      session: {
+        header: { origin: 'subagent', parentSession: parentExec.agent.id },
+        firstLiveSeq: 1,
+        snapshotEvents: () => childEvents.slice(),
+      },
+    }
+    const state = createContext({
+      settings: defaultSettings,
+      agents: { get: () => child, list: () => [child] },
+    })
+    await apply(state.ctx)
+    const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+    const waiting = wait.execute({}, { ...parentExec, signal: AbortSignal.timeout(500) })
+    await Promise.resolve()
+    childEvents.push(
+      { type: 'turn/start', data: { turn: 1 } },
+      { type: 'step/start', data: { turn: 1, step: 0 } },
+      { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: `${entry.name} output` }] } } },
+      { type: 'turn/end', data: { turn: 1, reason: { kind: entry.turnReason } } },
+    )
+    if (entry.droppedUnrun) {
+      childEvents.push({
+        type: 'agent/inbox/spliced',
+        data: { target: 'next-turn', start: 0, removedCount: 1, inserted: [], outcome: 'canceled' },
+      })
+    }
+    const notice = {
+      type: 'agent/inbox/spliced',
+      data: {
+        target: 'next-step',
+        start: 0,
+        inserted: [{
+          content: [],
+          source: {
+            kind: 'subagent-settled',
+            form: 'notice',
+            summary: expectedSettlementSummaryForTest(childId, entry.noticeReason),
+            senderSessionId: childId,
+          },
+        }],
+      },
+    }
+    parentEvents.push(notice)
+    state.emitSessionEvent(parentExec.agent.session, notice)
+    const [result] = await waiting
+    assert.equal(result.stopReason, entry.expected, entry.name)
+    assert.deepEqual(result.output, entry.outputWithheld ? [] : [{ type: 'text', text: `${entry.name} output` }], entry.name)
+  }
+})
+
+test('matching settlement proof fails closed when the retained child is permanently missing', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const childId = 'permanently-missing-child'
+  const parentEvents = []
+  const parentExec = execution({
+    agent: {
+      id: 'permanently-missing-parent',
+      options: {},
+      session: { snapshotEvents: () => parentEvents.slice() },
+    },
+  })
+  const state = createContext({
+    settings: defaultSettings,
+    agents: { get: () => undefined, list: () => [] },
+  })
+  await apply(state.ctx)
+  await state.runToolExecution({
+    name: 'subagent',
+    arguments: { description: 'Missing child' },
+    agent: parentExec.agent,
+  }, async () => ({ isError: false, value: { kind: 'continuable', subagentId: childId }, content: [] }))
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  const waiting = wait.execute({}, parentExec)
+  await new Promise((resolve) => setImmediate(resolve))
+  const notice = settlementNoticeForTest(childId, 'completed')
+  parentEvents.push(notice)
+  state.emitSessionEvent(parentExec.agent.session, notice)
+  t.mock.timers.tick(10_000)
+
+  await assert.rejects(waiting, /permanently-missing-child.*retained Agent history is unavailable/)
+  assert.deepEqual(await wait.execute({}, parentExec), [])
+  assert.doesNotThrow(() => state.emit('agent/disposed', { agent: parentExec.agent }))
+})
+
+test('a failed record does not consume a healthy sibling result needed by retry', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const parentEvents = []
+  const parentExec = execution({
+    agent: {
+      id: 'mixed-recovery-parent',
+      options: {},
+      session: { snapshotEvents: () => parentEvents.slice() },
+    },
+  })
+  const state = createContext({
+    settings: defaultSettings,
+    agents: { get: () => undefined, list: () => [] },
+  })
+  await apply(state.ctx)
+  for (const childId of ['mixed-healthy-child', 'mixed-missing-child']) {
+    await state.runToolExecution({
+      name: 'subagent',
+      arguments: { description: childId },
+      agent: parentExec.agent,
+    }, async () => ({ isError: false, value: { kind: 'continuable', subagentId: childId }, content: [] }))
+  }
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  const waiting = wait.execute({}, parentExec)
+  await new Promise((resolve) => setImmediate(resolve))
+  state.emit('subagent/end', {
+    runId: 'mixed-healthy-run',
+    id: 'mixed-healthy-child',
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Retain this healthy result.' }],
+  })
+  const notice = settlementNoticeForTest('mixed-missing-child', 'completed')
+  parentEvents.push(notice)
+  state.emitSessionEvent(parentExec.agent.session, notice)
+  t.mock.timers.tick(10_000)
+
+  await assert.rejects(waiting, /mixed-missing-child.*retained Agent history is unavailable/)
+  const retry = await wait.execute({}, parentExec)
+  assert.deepEqual(retry.map((entry) => entry.subagentId), ['mixed-healthy-child'])
+  assert.equal(retry[0].output[0].text, 'Retain this healthy result.')
+  assert.deepEqual(await wait.execute({}, parentExec), [])
+})
+
+test('matching settlement proof fails closed when retained activation history is corrupt', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const childId = 'corrupt-history-child'
+  const parentEvents = []
+  const parentExec = execution({
+    agent: {
+      id: 'corrupt-history-parent',
+      options: {},
+      session: { snapshotEvents: () => parentEvents.slice() },
+    },
+  })
+  let corrupt = false
+  const child = {
+    id: childId,
+    status: 'running',
+    session: {
+      header: { origin: 'subagent', parentSession: parentExec.agent.id },
+      firstLiveSeq: 1,
+      snapshotEvents() {
+        if (corrupt) throw new Error('corrupt retained log')
+        return [{ type: 'subagent/descriptor', data: { version: 3, mode: 'continuable', provider: 'spawn', label: 'Corrupt history' } }]
+      },
+    },
+  }
+  const state = createContext({
+    settings: defaultSettings,
+    agents: { get: () => child, list: () => [child] },
+  })
+  await apply(state.ctx)
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  const waiting = wait.execute({}, parentExec)
+  await new Promise((resolve) => setImmediate(resolve))
+  corrupt = true
+  const notice = settlementNoticeForTest(childId, 'completed')
+  parentEvents.push(notice)
+  assert.doesNotThrow(() => state.emitSessionEvent(parentExec.agent.session, notice))
+  t.mock.timers.tick(10_000)
+
+  await assert.rejects(waiting, /corrupt-history-child.*corrupt retained log/)
+  child.status = 'idle'
+  assert.deepEqual(await wait.execute({}, parentExec), [])
+})
+
+test('tracker Fiber teardown rejects active waits idempotently and clears watchdog timers', async (t) => {
+  const activeTimers = new Set()
+  const originalSetTimeout = globalThis.setTimeout
+  const originalClearTimeout = globalThis.clearTimeout
+  t.mock.method(globalThis, 'setTimeout', (callback, delay, ...args) => {
+    let timer
+    timer = originalSetTimeout(() => {
+      activeTimers.delete(timer)
+      callback(...args)
+    }, delay)
+    activeTimers.add(timer)
+    return timer
+  })
+  t.mock.method(globalThis, 'clearTimeout', (timer) => {
+    activeTimers.delete(timer)
+    return originalClearTimeout(timer)
+  })
+
+  const parentExec = execution({ agentId: 'tracker-disposal-parent' })
+  const state = createContext()
+  await apply(state.ctx)
+  const delegation = state.registeredTools.get('subagent_model')
+  const wait = state.registeredTools.get(WAIT_TOOL_NAME)
+  await delegation.execute({
+    model: 'deep',
+    description: 'Disposed tracker work',
+    prompt: 'Remain pending until tracker disposal.',
+  }, parentExec)
+  const waiting = wait.execute({}, parentExec)
+  await Promise.resolve()
+  assert.equal(activeTimers.size, 1)
+
+  state.disposeEffects()
+  state.disposeEffects()
+  await assert.rejects(waiting, /tracker was disposed before its active waits completed/)
+  assert.equal(activeTimers.size, 0)
+  await assert.rejects(wait.execute({}, parentExec), /tracker was disposed/)
+
+  const racingParent = execution({ agentId: 'tracker-disposal-settlement-race-parent' })
+  const racingState = createContext()
+  await apply(racingState.ctx)
+  const racingDelegation = racingState.registeredTools.get('subagent_model')
+  const racingWait = racingState.registeredTools.get(WAIT_TOOL_NAME)
+  await racingDelegation.execute({
+    model: 'deep',
+    description: 'Disposal settlement race',
+    prompt: 'Settle at the disposal boundary.',
+  }, racingParent)
+  const raced = racingWait.execute({}, racingParent)
+  racingState.emit('subagent/end', {
+    runId: 'run-child-1',
+    id: 'child-1',
+    stopReason: 'completed',
+    lastAssistantMessage: [{ type: 'text', text: 'Must not escape teardown.' }],
+  })
+  racingState.disposeEffects()
+  await assert.rejects(raced, /tracker was disposed before its active waits completed/)
+  assert.equal(activeTimers.size, 0)
 })
 
 test('parent disposal releases tracked children and active waits', async () => {
