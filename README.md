@@ -16,7 +16,7 @@ That means faster routine work, stronger results on difficult problems, better c
 - **Easy setup** — configure your model team from the Web UI, through a guided skill, or directly in `settings.yaml`.
 
 > [!TIP]
-> Already using [Better Sidebar](https://github.com/omdsh-dev/DSH-better-sidebar)? The router enhances its existing **Tasks** tree with inline model chips—no separate topology view or Better Sidebar modification required.
+> Already using [Better Sidebar](https://github.com/omdsh-dev/DSH-better-sidebar)? The router adds an optional **Sub-agents** tab through Better Sidebar's public `registerTab` API.
 
 ## See it in action
 
@@ -43,9 +43,10 @@ That means faster routine work, stronger results on difficult problems, better c
 - **Settings → Subagent Models**: a Web settings page for manually adding, editing, and removing routes.
 - A hot-reloaded `subagent-model-router` namespace in `~/.dsh/settings.yaml`.
 - Foreground execution and durable continuable background subagents.
+- Configurable stale-subagent filtering for listing tools, defaulting to 20 parent/user message turns without contact.
 - An active-model chip in an opened subagent header.
 - Active-model chips in healthy rows of the parent session's subagent catalog.
-- An optional inline model chip in each existing Better Sidebar **Tasks** row.
+- An optional Better Sidebar **Sub-agents** tab registered through the public sidebar service (when installed).
 
 With an empty `models` list, the catalog, configuration, and wait tools remain available alongside the settings page and setup skill, but `subagent_model` is not registered. This provides a bootstrap state for initial setup.
 
@@ -61,13 +62,15 @@ An interrupted child can be idle with queued input that will not run until expli
 
 As a defense in depth for Harness versions affected by the continuable ownership-hold ordering bug, the router rejects a model tool call that uses `send_message` to target its own calling agent id. The rejection happens in the public `tools/execute` waterfall before the built-in tool calls the subagent service, and a resident child receives its direct parent id in the error hint. This deliberately narrow guard does not replace the core fix: it cannot protect direct subagent-service callers, reject every other invalid resident relationship, or repair ownership state already corrupted in the current host process. Deploying this source requires the normal plugin rebuild/reload (or a host restart); an already-corrupted process still requires a host restart.
 
+`listingInactivityTurns` keeps old continuable children from crowding model-facing discovery. For each direct parent, the router counts incoming human messages (or parent-agent relay messages for nested agents) and resets a child's window whenever that child receives a parent/user message. Once the configured number of turns passes without contact, `list_agents` omits that child. This is presentation-only: the durable child is not deleted, unloaded, or made unaddressable, so a known id still works with `send_message` and can reappear after contact. Set the option to `0` to disable filtering. After a router reload, children without reliable process-local contact history receive a fresh visibility window rather than being hidden on incomplete evidence.
+
 If a committed manager settlement notice exists but the exact retained result is unavailable, corrupt, or inconsistent, watchdog reconciliation reports a diagnostic error rather than fabricating output or waiting forever. The immediate notice path leaves room for the normal terminal event to arrive first. Plugin unload explicitly rejects active waits and releases tracker state and watchdog timers.
 
 ## Model identity chips
 
 The opened subagent header and every healthy row in its parent's subagent catalog show the configured friendly display name for the latest adapter-resolved request, falling back to the model id when that route is not in the current router settings. Hover and accessible text expose the complete `provider/model` route. The plugin resets the route at the child's own descriptor so a fork cannot inherit its ancestor's model, and it omits the chip until the child records an authoritative request route.
 
-When Better Sidebar is installed, the router's client extension maps its semantic **Tasks** tree rows to the authoritative DSH session/catalog snapshot and appends a compact, non-interactive chip beside each subagent label. It reuses the native header/catalog projection and friendly-name formatter, preserves completed-run identity, and adds the full route to the tree row's accessible name. The observer and every injected node are lifecycle-managed and removed when the router unloads. No Better Sidebar source change, replacement tab, runtime import, or settings toggle is required; when Better Sidebar is absent, the extension is inert.
+When Better Sidebar is installed, the router registers a single-instance **Sub-agents** tab with `betterSidebar.registerTab({ id, title, component, single, order })`. The tab reads the authoritative DSH session catalog, renders nested children with model identities, and manages catalog observation only while visible. Registration is scoped with `ctx.inject(['betterSidebar'], ...)`, so the native router never waits for the optional service; late service load and unload are handled automatically. The native Better Sidebar controls which tab is selected and currently restores its Start page after refresh; use the `+` menu to reopen **Sub-agents**. (The optional bottom workbench has separate persistence semantics.) When the service is absent, the integration is inert.
 
 ## Requirements
 
@@ -75,7 +78,7 @@ When Better Sidebar is installed, the router's client extension maps its semanti
 - The Web profile and built-in subagent conversation UI
 - A preset exposing the normal skill loader/tool
 - The Host `spawn` subagent provider, included by standard DSH profiles
-- Optional: a compatible `dsh-better-sidebar` release with its semantic Tasks tree (`0.15.2` and `0.16.x` are supported)
+- Optional: a compatible `dsh-better-sidebar` release exposing the public `registerTab` API (including the native right-sidebar surface)
 
 ## Install
 
@@ -100,7 +103,7 @@ The **Subagent Models** settings page provides controls for:
 - model alias, display name, LLM provider route, and exact model id;
 - comma-separated routing tags and the “when to use” description;
 - optional per-model output-token caps;
-- subagent backend, delegation depth, and background execution.
+- subagent backend, delegation depth, background execution, and stale-listing turn threshold.
 
 On DSH rc.6, the built-in Web settings API exposes only a fixed namespace allowlist. This plugin therefore uses a package-owned, same-origin Host endpoint backed by the same Settings service, schema validation, persistence, and revision conflict protection. Successful changes apply live: the old delegation tool is removed and the updated schema and prompt guidance are registered immediately.
 
@@ -126,6 +129,7 @@ subagent-model-router:
   subagentProvider: spawn
   maxDepth: 3
   enableRunInBackground: true
+  listingInactivityTurns: 20
   models:
     - alias: fast
       provider: acme
@@ -159,6 +163,7 @@ See `examples/settings.yaml` for a copyable document fragment. The settings file
 | `subagentProvider` | `spawn` | Subagent execution backend, not the LLM provider. |
 | `maxDepth` | `3` | Maximum delegation depth enforced by the backend. |
 | `enableRunInBackground` | `true` | Enable durable background children and default to them. |
+| `listingInactivityTurns` | `20` | Omit children from `list_agents` after this many parent/user message turns without contact. `0` disables filtering; direct addressing and resumability are unchanged. |
 
 The delegation tool is always named `subagent_model`. Legacy `toolName` values from versions before 0.4 are ignored and are removed the next time the namespace is saved.
 
@@ -168,7 +173,7 @@ The live catalog is advisory: some adapters accept model ids they do not adverti
 
 DSH rc.6 has no additive slot inside a subagent catalog row, so the plugin owns the existing `subagent-catalog` header cell to render row chips. It claims that cell by registering at `priority: -1` — a list cell renders its lowest live priority, and the host's own entry sits at the default `0`. The `subagent-model` cell is registered the same way so a host build that also fills it stays shadowed rather than clashing. Catalog interaction changes in DSH must be mirrored here until the host exposes a row extension slot or renders `subagentModelRoute` itself.
 
-Better Sidebar currently exposes tab and file-viewer registration but no additive seam inside its built-in Tasks rows. To keep the feature wholly owned by this plugin, the router targets only Better Sidebar's semantic root/tree/treeitem attributes and the public DSH sessions snapshot; it does not depend on CSS-module class names. An incompatible change to that semantic DOM may require a router update. The router deliberately contributes no fallback topology tab, keeping one authoritative task tree.
+Better Sidebar's public tab registry is the supported integration seam. The router does not scrape foreign DOM, inject into native Tasks rows, or modify Better Sidebar source. The registered tab is optional and scoped to the service lifecycle; if Better Sidebar is unavailable, native headers, catalogs, settings, and model chips continue unchanged.
 
 ## Development
 

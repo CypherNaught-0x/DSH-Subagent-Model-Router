@@ -444,6 +444,122 @@ test('does not block send_message delivery to a resident child direct parent', a
   assert.equal(result, expected)
 })
 
+test('filters stale subagents from list_agents without removing direct addressing', async () => {
+  const parentEvents = []
+  const parent = {
+    id: 'listing-parent',
+    options: {},
+    session: {
+      header: { id: 'listing-parent', origin: 'user' },
+      snapshotEvents: () => parentEvents.slice(),
+    },
+  }
+  const children = new Map()
+  const state = createContext({
+    settings: { ...defaultSettings, listingInactivityTurns: 2 },
+    agents: { get: (id) => id === parent.id ? parent : children.get(id) },
+  })
+  await apply(state.ctx)
+  const listTool = {
+    name: 'list_agents',
+    output: {
+      render: (_args, entries) => [{ type: 'text', text: entries.map((entry) => entry.id).join(',') || '(no subagents)' }],
+    },
+  }
+  state.registeredTools.set('list_agents', listTool)
+  const exec = { name: 'list_agents', arguments: {}, agent: parent }
+  const listed = [{ kind: 'child', id: 'child-listing', label: 'Listing child', status: 'ready' }]
+  const callList = () => state.runToolExecution(exec, async () => ({
+    isError: false,
+    value: listed,
+    content: [{ type: 'text', text: 'child-listing' }],
+  }))
+
+  assert.deepEqual((await callList()).value, listed)
+  for (let turn = 0; turn < 2; turn += 1) {
+    const event = { type: 'user/message', data: { content: [], source: { kind: 'user' } } }
+    parentEvents.push(event)
+    state.emitSessionEvent(parent.session, event)
+  }
+  const hidden = await callList()
+  assert.deepEqual(hidden.value, [])
+  assert.deepEqual(hidden.content, [{ type: 'text', text: '(no subagents)' }])
+  assert.equal(children.has('child-listing'), false, 'filtering does not mutate the Agent registry or resumability state')
+
+  const childSession = {
+    header: { id: 'child-listing', origin: 'subagent', parentSession: parent.id },
+    events: [],
+  }
+  const contact = {
+    type: 'user/message',
+    data: { content: [], source: { kind: 'coordinator', form: 'relay', senderSessionId: parent.id } },
+  }
+  childSession.events.push(contact)
+  state.emitSessionEvent(childSession, contact)
+  assert.deepEqual((await callList()).value, listed)
+})
+
+test('session disposal retires listing activity for both child and parent ids', async () => {
+  const parentEvents = []
+  const parent = {
+    id: 'cleanup-parent',
+    options: {},
+    session: {
+      id: 'cleanup-parent',
+      header: { id: 'cleanup-parent', origin: 'user' },
+      snapshotEvents: () => parentEvents.slice(),
+    },
+  }
+  const state = createContext({
+    settings: { ...defaultSettings, listingInactivityTurns: 1 },
+    agents: { get: (id) => id === parent.id ? parent : undefined },
+  })
+  await apply(state.ctx)
+  state.registeredTools.set('list_agents', {
+    name: 'list_agents',
+    output: { render: () => [] },
+  })
+  const listed = [{ kind: 'child', id: 'cleanup-child', label: 'Cleanup child', status: 'ready' }]
+  const callList = () => state.runToolExecution({ name: 'list_agents', arguments: {}, agent: parent }, async () => ({
+    isError: false,
+    value: listed,
+    content: [],
+  }))
+  const advanceParent = () => {
+    const event = { type: 'user/message', data: { content: [], source: { kind: 'user' } } }
+    parentEvents.push(event)
+    state.emitSessionEvent(parent.session, event)
+  }
+
+  assert.equal((await callList()).value.length, 1)
+  advanceParent()
+  assert.equal((await callList()).value.length, 0)
+
+  state.emit('session/disposed', { id: 'cleanup-child' })
+  assert.equal((await callList()).value.length, 1, 'disposed child ids are removed from parent contact maps')
+  advanceParent()
+  assert.equal((await callList()).value.length, 0)
+
+  state.emit('session/disposed', parent.session)
+  assert.equal((await callList()).value.length, 1, 'a reused parent id starts from its current lifecycle history')
+})
+
+test('listing inactivity filtering defaults to twenty turns and zero disables it', async () => {
+  const state = createContext({ settings: defaultSettings })
+  await apply(state.ctx)
+  const configuration = state.registeredTools.get(CONFIG_TOOL_NAME)
+  const current = await configuration.execute({ action: 'get' }, execution())
+  assert.equal(current.settings.listingInactivityTurns, 20)
+
+  const updated = await configuration.execute({
+    action: 'update',
+    models: [],
+    listing_inactivity_turns: 0,
+  }, execution())
+  assert.equal(updated.settings.listingInactivityTurns, 0)
+  assert.equal(configuration.parameters.properties.listing_inactivity_turns.type, 'integer')
+})
+
 test('routes foreground work through the selected settings model', async () => {
   const state = createContext()
   await apply(state.ctx)

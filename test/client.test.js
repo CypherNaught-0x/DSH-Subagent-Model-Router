@@ -78,6 +78,7 @@ test('model editor cards keep stable identity through edits and array changes', 
     subagentProvider: 'spawn',
     maxDepth: 3,
     enableRunInBackground: true,
+    listingInactivityTurns: 20,
     models: [
       { alias: 'fast-renamed', provider: 'acme', model: 'reasoner', tags: [], description: 'quick' },
       { alias: '', provider: '', model: '', tags: [], description: '' },
@@ -194,6 +195,32 @@ function findNode(node, predicate) {
   if (predicate(node)) return node
   return findNode(node.children, predicate)
 }
+
+test('Better Sidebar tab registration is optional, late-loadable, and disposable', async () => {
+  const { plugin } = await loadClient()
+  const registrations = []
+  const services = {
+    slots: { inject: (_name, callback) => callback(), register: () => () => {} },
+    connection: { api: {}, isLoopback: true },
+    remote: { $on: () => () => {} },
+    sessions: {},
+    betterSidebar: { registerTab(descriptor) { registrations.push(descriptor); return () => registrations.splice(registrations.indexOf(descriptor), 1) } },
+  }
+  const effects = []
+  const ctx = {
+    get: (name) => services[name],
+    on: () => () => {},
+    effect: (fn) => { const dispose = fn(); effects.push(dispose); return dispose },
+    inject: (_deps, callback) => { callback(ctx); return { dispose() {} } },
+  }
+  plugin.apply(ctx)
+  assert.equal(registrations.length, 1)
+  assert.equal(registrations[0].id, 'dsh-subagent-model-router:subagents')
+  assert.equal(registrations[0].single, true)
+  assert.equal(registrations[0].order, 31)
+  effects.reverse().forEach((dispose) => dispose?.())
+  assert.equal(registrations.length, 0)
+})
 
 test('header chip shows the active route only for an addressed subagent', async () => {
   const { plugin } = await loadClient()
@@ -390,47 +417,39 @@ test('catalog rows render the active model as an accessible chip', async () => {
   assert.equal(chip.children[0].children[0], 'reasoner')
   const row = findNode(tree, (node) => node.props?.role === 'treeitem')
   assert.match(row.props['aria-label'], /acme\/reasoner/)
+  const runningDot = findNode(row, (node) => node.props?.className === 'dsh-smr-catalog-dot-running')
+  assert.equal(runningDot.props.role, 'img')
+  assert.equal(runningDot.props['aria-label'], 'activity.running')
+  const meta = findNode(row, (node) => node.props?.style?.flexDirection === 'column' && node.props?.style?.alignItems === 'flex-end')
+  assert.ok(meta)
+  assert.equal(meta.children[0].props.title, 'acme/reasoner')
 })
 
-test('maps Better Sidebar Tasks rows to exact nested catalog children', async () => {
+test('Better Sidebar tab renders authoritative nested catalog rows without DOM scraping', async () => {
   const { plugin } = await loadClient()
-  const routeA = { provider: 'acme', model: 'fast' }
-  const routeB = { provider: 'acme', model: 'deep' }
-  const routeGrandchild = { provider: 'acme', model: 'reviewer' }
-  const snapshot = {
-    current: 'grandchild',
-    byId: {
-      root: { id: 'root', displayTitle: 'Main', origin: 'user' },
-      a: { id: 'a', displayTitle: 'Review', origin: 'subagent', parentId: 'root', projectionValues: { subagentModelRoute: routeA } },
-      b: { id: 'b', displayTitle: 'Review', origin: 'subagent', parentId: 'root', projectionValues: { subagentModelRoute: routeB } },
-      grandchild: { id: 'grandchild', displayTitle: 'Verify', origin: 'subagent', parentId: 'a', projectionValues: { subagentModelRoute: routeGrandchild } },
-      side: { id: 'side', displayTitle: 'Side: notes', origin: 'subagent', parentId: 'root' },
-    },
+  const state = {
+    current: 'parent',
     subagentsByParent: {
-      root: {
-        entries: [
-          { kind: 'child', id: 'side', label: 'Side: notes' },
-          { kind: 'child', id: 'a', label: 'Review' },
-          { kind: 'child', id: 'b', label: 'Review' },
-        ],
-      },
-      a: { entries: [{ kind: 'child', id: 'grandchild', label: 'Verify' }] },
+      parent: { state: 'ready', error: null, parentAvailable: true, entries: [{ kind: 'child', id: 'child', label: 'Review', mode: 'continuable', activity: 'running', hasChildren: false }] },
+    },
+    byId: {
+      parent: { id: 'parent', origin: 'user' },
+      child: { id: 'child', origin: 'subagent', parentId: 'parent', running: true, projectionValues: { subagentModelRoute: { provider: 'acme', model: 'reasoner' }, subagentTiming: { settledMs: 65000 } } },
     },
   }
-  const elements = [{}, {}, {}, {}]
-  const labels = [{}, {}, {}, {}]
-  const rows = [
-    { element: elements[0], labelElement: labels[0], label: 'Main', level: '0', disabled: false },
-    { element: elements[1], labelElement: labels[1], label: 'Review', level: '1', disabled: false },
-    { element: elements[2], labelElement: labels[2], label: 'Verify', level: '2', disabled: false },
-    { element: elements[3], labelElement: labels[3], label: 'Review', level: '1', disabled: false },
-  ]
-
-  const assignments = plugin.betterSidebarTaskRowAssignments(snapshot, rows)
-  assert.deepEqual(assignments.map((assignment) => assignment.summary.id), ['a', 'grandchild', 'b'])
-  assert.deepEqual(assignments.map((assignment) => assignment.summary.projectionValues.subagentModelRoute), [routeA, routeGrandchild, routeB])
-  assert.equal(assignments[0].row, elements[1])
-  assert.equal(assignments[0].label, labels[1])
+  const calls = []
+  const tree = expandFunctionComponents(plugin.BetterSidebarSubagentTab({
+    ctx: { get: (name) => name === 'sessions' ? { list: { getSnapshot: () => state, subscribe: () => () => {} }, setSubagentCatalogOpen: (...args) => calls.push(args) } : undefined },
+    scope: { sessionId: 'parent' }, visible: true,
+  }))
+  const row = findNode(tree, (node) => node.props?.role === 'treeitem')
+  assert.match(row.props['aria-label'], /acme\/reasoner/)
+  assert.match(row.props['aria-label'], /1:05/)
+  assert.doesNotMatch(row.props['aria-label'], /duration\.minutes/)
+  assert.equal(findNode(tree, (node) => node.props?.['data-dsh-subagent-model-route'] !== undefined), undefined)
+  const motionStyles = findNode(tree, (node) => node.type === 'style')
+  assert.match(motionStyles.props.dangerouslySetInnerHTML.__html, /prefers-reduced-motion/)
+  assert.match(motionStyles.props.dangerouslySetInnerHTML.__html, /dsh-smr-catalog-dot-running/)
 })
 
 test('catalog unmount closes every expanded descendant with the service receiver intact', async () => {
@@ -499,7 +518,7 @@ test('client uses the plugin endpoint instead of the rc.6 allowlisted settings A
 
 test('package manifest publishes and injects the client bundle', async () => {
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
-  assert.equal(manifest.version, '0.7.0')
+  assert.equal(manifest.version, '0.8.0')
   assert.equal(manifest.exports['./client'], './lib/client.js')
   assert.equal(manifest.dsh.client.platform, 'web')
   assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-settings'))

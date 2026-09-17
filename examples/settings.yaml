@@ -3,6 +3,9 @@ subagent-model-router:
   subagentProvider: spawn
   maxDepth: 3
   enableRunInBackground: true
+  # Hide uncontacted subagents from list_agents after this many parent/user turns.
+  # Set to 0 to disable filtering; hidden subagents remain directly addressable.
+  listingInactivityTurns: 20
   models:
     - alias: fast
       provider: acme
