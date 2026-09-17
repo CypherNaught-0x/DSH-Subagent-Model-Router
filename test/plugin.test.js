@@ -242,8 +242,15 @@ function createContext(options = {}) {
       error() {},
     },
     on(event, listener) {
-      listeners.set(event, listener)
-      return () => listeners.delete(event)
+      const previous = listeners.get(event)
+      if (event === 'tools/execute' && previous !== undefined) {
+        listeners.set(event, function (exec, next) {
+          return previous.call(this, exec, () => listener.call(this, exec, next))
+        })
+      } else {
+        listeners.set(event, listener)
+      }
+      return () => previous === undefined ? listeners.delete(event) : listeners.set(event, previous)
     },
     effect(callback) {
       const dispose = callback()
@@ -388,6 +395,53 @@ test('registers settings, setup skill, catalog, and configured model tool', asyn
     model: 'parent-model',
   })
   assert.equal(result.providers[0].models[0].id, 'reasoner')
+})
+
+test('rejects a self-directed send_message before the underlying tool runs', async () => {
+  const state = createContext()
+  await apply(state.ctx)
+  const caller = {
+    id: 'resident-child',
+    options: {},
+    session: { header: { id: 'resident-child', origin: 'subagent', parentSession: 'direct-parent' } },
+  }
+  let dispatched = false
+
+  await assert.rejects(
+    state.runToolExecution({
+      name: 'send_message',
+      arguments: { agent_id: caller.id, message: 'accidental self-send' },
+      agent: caller,
+    }, async () => {
+      dispatched = true
+      return { isError: false, value: { messageId: 'should-not-exist' }, content: [] }
+    }),
+    /cannot target the calling agent itself.*target "direct-parent" instead/,
+  )
+  assert.equal(dispatched, false)
+})
+
+test('does not block send_message delivery to a resident child direct parent', async () => {
+  const state = createContext()
+  await apply(state.ctx)
+  const caller = {
+    id: 'resident-child',
+    options: {},
+    session: { header: { id: 'resident-child', origin: 'subagent', parentSession: 'direct-parent' } },
+  }
+  const expected = { isError: false, value: { messageId: 'delivered' }, content: [] }
+  let dispatched = false
+
+  const result = await state.runToolExecution({
+    name: 'send_message',
+    arguments: { agent_id: 'direct-parent', message: 'result' },
+    agent: caller,
+  }, async () => {
+    dispatched = true
+    return expected
+  })
+  assert.equal(dispatched, true)
+  assert.equal(result, expected)
 })
 
 test('routes foreground work through the selected settings model', async () => {
