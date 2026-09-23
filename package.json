@@ -56,7 +56,7 @@
     "dsh-better-sidebar": { "optional": true }
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.1",
+    "@deepseek-ai/schemastery": "^3.18.3",
     "zod": "^4.4.3"
   },
   "devDependencies": {
