@@ -47,6 +47,7 @@ That means faster routine work, stronger results on difficult problems, better c
 - An active-model chip in an opened subagent header.
 - Active-model chips in healthy rows of the parent session's subagent catalog.
 - An optional Better Sidebar **Sub-agents** tab registered through the public sidebar service (when installed).
+- Activity-sorted catalog trees: running branches first, resident idle branches next, and inactive-only branches in collapsed **Inactive (N)** collections. Active descendants keep their ancestry visible; unknown or unloaded branches remain visible until their state is known. Ordering updates with session activity and preserves sibling order within each status.
 
 With an empty `models` list, the catalog, configuration, and wait tools remain available alongside the settings page and setup skill, but `subagent_model` is not registered. This provides a bootstrap state for initial setup.
 

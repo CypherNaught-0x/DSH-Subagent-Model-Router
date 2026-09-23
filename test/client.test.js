@@ -196,6 +196,16 @@ function findNode(node, predicate) {
   return findNode(node.children, predicate)
 }
 
+function findNodes(node, predicate, matches = []) {
+  if (Array.isArray(node)) {
+    for (const child of node) findNodes(child, predicate, matches)
+    return matches
+  }
+  if (node === null || typeof node !== 'object') return matches
+  if (predicate(node)) matches.push(node)
+  return findNodes(node.children, predicate, matches)
+}
+
 test('Better Sidebar tab registration is optional, late-loadable, and disposable', async () => {
   const { plugin } = await loadClient()
   const registrations = []
@@ -418,8 +428,10 @@ test('catalog rows render the active model as an accessible chip', async () => {
   const row = findNode(tree, (node) => node.props?.role === 'treeitem')
   assert.match(row.props['aria-label'], /acme\/reasoner/)
   const runningDot = findNode(row, (node) => node.props?.className === 'dsh-smr-catalog-dot-running')
-  assert.equal(runningDot.props.role, 'img')
+  assert.equal(runningDot.props.role, 'status')
   assert.equal(runningDot.props['aria-label'], 'activity.running')
+  assert.equal(runningDot.props['aria-live'], 'polite')
+  assert.equal(runningDot.props['aria-atomic'], 'true')
   const meta = findNode(row, (node) => node.props?.style?.flexDirection === 'column' && node.props?.style?.alignItems === 'flex-end')
   assert.ok(meta)
   assert.equal(meta.children[0].props.title, 'acme/reasoner')
@@ -448,8 +460,42 @@ test('Better Sidebar tab renders authoritative nested catalog rows without DOM s
   assert.doesNotMatch(row.props['aria-label'], /duration\.minutes/)
   assert.equal(findNode(tree, (node) => node.props?.['data-dsh-subagent-model-route'] !== undefined), undefined)
   const motionStyles = findNode(tree, (node) => node.type === 'style')
-  assert.match(motionStyles.props.dangerouslySetInnerHTML.__html, /prefers-reduced-motion/)
-  assert.match(motionStyles.props.dangerouslySetInnerHTML.__html, /dsh-smr-catalog-dot-running/)
+  const motionCss = motionStyles.props.dangerouslySetInnerHTML.__html
+  assert.match(motionCss, /prefers-reduced-motion/)
+  assert.match(motionCss, /dsh-smr-catalog-dot-running/)
+  assert.match(motionCss, /dshSmrCatalogOrbit/)
+  assert.doesNotMatch(motionCss, /scale\(|box-shadow/)
+})
+
+test('catalog treeitems keep each child group below its row', async () => {
+  const { plugin } = await loadClient({ stateValues: [true, new Set(['inactive:parent', 'child'])] })
+  const state = {
+    subagentsByParent: {
+      parent: { state: 'ready', error: null, parentAvailable: true, entries: [{ kind: 'child', id: 'child', label: 'Parent child', mode: 'continuable', activity: 'inactive', hasChildren: true }] },
+      child: { state: 'ready', error: null, parentAvailable: true, entries: [{ kind: 'child', id: 'grandchild', label: 'Nested child', mode: 'one-shot', activity: 'inactive', hasChildren: false }] },
+    },
+    byId: {
+      child: { id: 'child', origin: 'subagent', parentId: 'parent', running: false, projectionValues: {} },
+      grandchild: { id: 'grandchild', origin: 'subagent', parentId: 'child', running: false, projectionValues: {} },
+    },
+  }
+  const tree = expandFunctionComponents(plugin.SubagentCatalogAction({
+    sessionId: 'parent',
+    useSessions: (selector) => selector(state),
+    sessions: { openSubagent() {}, refreshSubagents() {}, setSubagentCatalogOpen() {} },
+    t: (key) => key,
+  }))
+  const items = findNodes(tree, (node) => node.props?.role === 'treeitem')
+  assert.equal(items.length, 3)
+  const parentItem = items.find((item) => item.props['aria-label']?.startsWith('Parent child'))
+  assert.ok(parentItem)
+  const row = parentItem.children[0]
+  const group = parentItem.children[1]
+  assert.equal(row.props.role, undefined)
+  assert.equal(group.props.role, 'group')
+  assert.equal(row.children.some((child) => child?.props?.role === 'group'), false)
+  assert.equal(parentItem.props.style.width, '100%')
+  assert.equal(group.props.style.marginLeft, 26)
 })
 
 test('catalog unmount closes every expanded descendant with the service receiver intact', async () => {
@@ -514,6 +560,68 @@ test('client uses the plugin endpoint instead of the rc.6 allowlisted settings A
   assert.doesNotMatch(source, /api\.settings\.describe/)
   assert.doesNotMatch(source, /api\.settings\.update/)
   assert.doesNotMatch(source, /connection\.isLoopback/)
+})
+
+test('catalog ordering prioritizes running, resident, and preserves stable order', async () => {
+  const { plugin } = await loadClient()
+  const entries = [
+    { kind: 'child', id: 'inactive', mode: 'one-shot', activity: 'inactive', hasChildren: false },
+    { kind: 'child', id: 'resident', mode: 'continuable', activity: 'running', hasChildren: false },
+    { kind: 'child', id: 'running', mode: 'one-shot', activity: 'running', hasChildren: false },
+    { kind: 'diagnostic', id: 'diagnostic', reason: 'unavailable' },
+  ]
+  const ordered = plugin.orderedCatalogEntries(entries, {}, {
+    inactive: { id: 'inactive', running: false },
+    resident: { id: 'resident', running: false },
+    running: { id: 'running', running: true },
+  })
+  assert.deepEqual(ordered.active.map((entry) => entry.id), ['running', 'resident'])
+  assert.deepEqual(ordered.inactive.map((entry) => entry.id), ['inactive'])
+  assert.deepEqual(ordered.diagnostics.map((entry) => entry.id), ['diagnostic'])
+})
+
+test('inactive continuables group without summaries while active descendants preserve ancestry', async () => {
+  const { plugin } = await loadClient()
+  const child = (id, extras = {}) => ({ kind: 'child', id, mode: 'continuable', activity: 'inactive', hasChildren: false, ...extras })
+  const entries = [child('done'), child('ancestor', { hasChildren: true }), child('unknown', { hasChildren: true }), child('run1'), child('run2')]
+  const catalogs = { ancestor: { state: 'ready', entries: [child('nested')] } }
+  const summaries = { nested: { running: true }, run1: { running: true }, run2: { running: true } }
+  const ordered = plugin.orderedCatalogEntries(entries, catalogs, summaries)
+  assert.deepEqual(ordered.active.map((e) => e.id), ['ancestor', 'run1', 'run2', 'unknown'])
+  assert.deepEqual(ordered.inactive.map((e) => e.id), ['done'])
+  summaries.nested.running = false
+  summaries.run1.running = false
+  const settled = plugin.orderedCatalogEntries(entries, catalogs, summaries)
+  assert.deepEqual(settled.inactive.map((e) => e.id), ['done', 'ancestor', 'run1'])
+  assert.equal(new Set([...settled.active, ...settled.inactive].map((e) => e.id)).size, entries.length)
+})
+
+test('inactive collection is collapsed by default and opens each inactive child once', async () => {
+  for (const open of [false, true]) {
+    const { plugin } = await loadClient({ stateValues: [true, new Set(open ? ['inactive:parent'] : [])] })
+    const entries = ['done-a', 'done-b'].map((id) => ({ kind: 'child', id, label: id, mode: 'continuable', activity: 'inactive', hasChildren: false }))
+    const state = { subagentsByParent: { parent: { state: 'ready', entries } }, byId: {} }
+    const tree = expandFunctionComponents(plugin.SubagentCatalogAction({ sessionId: 'parent', useSessions: (select) => select(state), sessions: { setSubagentCatalogOpen() {} }, t: (key) => key }))
+    const items = findNodes(tree, (node) => node.props?.role === 'treeitem')
+    const collection = items.find((node) => node.props['aria-label'] === 'Inactive (2)')
+    assert.ok(collection)
+    assert.equal(collection.props['aria-expanded'], open)
+    assert.equal(collection.props.onClick, undefined, 'descendant clicks must not toggle the collection')
+    assert.equal(items.length, open ? 3 : 1)
+    let prevented = false
+    collection.props.onKeyDown({ key: 'ArrowRight', target: collection, currentTarget: collection, preventDefault() { prevented = true }, stopPropagation() {} })
+    assert.equal(prevented, !open, 'right arrow only expands a closed collection')
+  }
+})
+
+test('sidebar collection expansion never observes synthetic session ids', async () => {
+  const { plugin, effectCleanups } = await loadClient({ runEffects: true, stateValues: [new Set(['inactive:parent']), 0] })
+  const calls = []
+  const state = { current: 'parent', byId: { parent: { id: 'parent', origin: 'user' } }, subagentsByParent: { parent: { state: 'ready', entries: [] } } }
+  const sessions = { list: { getSnapshot: () => state, subscribe: () => () => {} }, setSubagentCatalogOpen(id, open) { calls.push([id, open]) } }
+  plugin.BetterSidebarSubagentTab({ ctx: { get: () => sessions }, visible: true, scope: { sessionId: 'parent' } })
+  for (const cleanup of effectCleanups.reverse()) cleanup()
+  assert.ok(calls.every(([id]) => id === 'parent'))
 })
 
 test('package manifest publishes and injects the client bundle', async () => {
