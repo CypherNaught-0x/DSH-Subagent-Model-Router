@@ -1,4 +1,8 @@
-# Mount only; user configuration lives in settings.yaml.
+# Mount only; user configuration lives in this entry's own config.
+#
+# The row id matches SETTINGS_NAMESPACE on purpose: dsh >= 0.1.7 derives a
+# settings namespace from a Loader entry id, so the id is what keeps the
+# namespace stable across the move off `ctx.settings.register`.
 - insert:
-    - id: dsh-subagent-model-router
+    - id: subagent-model-router
       name: dsh-subagent-model-router
