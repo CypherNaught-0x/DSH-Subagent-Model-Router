@@ -1,6 +1,6 @@
 # Set up model-selectable subagents
 
-Use this skill to choose which existing Harness model routes are exposed through `subagent_model`, then generate concise routing guidance for each route. Configuration is stored under `subagent-model-router` in `settings.yaml`; do not put model configuration in a Cordis patch.
+Use this skill to choose which existing Harness model routes are exposed through `subagent_model`, then generate concise routing guidance for each route. Configuration is the `config:` of the `- id: dsh-subagent-model-router` Loader entry in a Cordis patch (DSH 0.1.7 has no `settings.yaml`).
 
 ## Workflow
 
@@ -21,35 +21,37 @@ Use this skill to choose which existing Harness model routes are exposed through
 8. Ground factual claims in provider metadata or reliable model knowledge. Do not invent claims about price, speed, context size, privacy, benchmark rank, or modalities. When such a property would affect routing but is uncertain, ask the user instead.
 9. Call `configure_subagent_models` with `action: "get"` to preserve the current backend, depth, background, and listing-inactivity defaults unless the user asked to change them.
 10. Present the complete proposed replacement model list and obtain explicit confirmation before writing settings.
-11. After confirmation, call `configure_subagent_models` with `action: "update"` and the complete `models` array. Pass `subagent_provider`, `max_depth`, `enable_run_in_background`, or `listing_inactivity_turns` only when the user approved changing those values. Do not edit `settings.yaml` directly when this tool is available.
-12. Settings apply live. Verify that the delegation tool is visible and its `model` enum contains exactly the selected aliases. If the package was newly installed or its Client bundle changed, restart DSH and refresh the page first.
+11. After confirmation, call `configure_subagent_models` with `action: "update"` and the complete `models` array. Pass `subagent_provider`, `max_depth`, `enable_run_in_background`, or `listing_inactivity_turns` only when the user approved changing those values. Do not edit patch files directly when this tool is available.
+12. If the update fails because a home patch (`$DSH_HOME/cordis.patch.yml`) or a `--patch` overlay overrides the entry, show the user the proposed entry below and ask them to put it in that file; do not retry the tool.
+13. Settings apply live. Verify that the delegation tool is visible and its `model` enum contains exactly the selected aliases. If the package was newly installed or its Client bundle changed, restart DSH and refresh the page first.
 
 ## Settings shape
 
 ```yaml
-subagent-model-router:
-  subagentProvider: spawn
-  maxDepth: 3
-  enableRunInBackground: true
-  listingInactivityTurns: 20 # 0 disables stale-list filtering
-  models:
-    - alias: fast
-      provider: provider-route
-      model: exact-model-id
-      displayName: Human-readable model name
-      tags: [fast, routine]
-      description: Use for quick, well-scoped tasks where the user prefers low latency.
-      # Optional output cap. On DSH rc.6 this is not restored after a
-      # continuable child is cold-resumed:
-      # maxTokens: 8192
+- id: dsh-subagent-model-router
+  config:
+    subagentProvider: spawn
+    maxDepth: 3
+    enableRunInBackground: true
+    listingInactivityTurns: 20 # 0 disables stale-list filtering
+    models:
+      - alias: fast
+        provider: provider-route
+        model: exact-model-id
+        displayName: Human-readable model name
+        tags: [fast, routine]
+        description: Use for quick, well-scoped tasks where the user prefers low latency.
+        # Optional output cap. DSH rc.6 did not restore it after a
+        # continuable child was cold-resumed:
+        # maxTokens: 8192
 ```
 
 `alias` values must be unique and use lowercase letters, numbers, underscores, or hyphens. Tags must be lowercase kebab-case. `provider` is the LLM route; `subagentProvider` is the execution backend and normally remains `spawn`.
 
 ## Editing safety
 
-- `configure_subagent_models` is the preferred model-facing write path. It is limited to this plugin's namespace, validates the same schema as the UI, and needs no filesystem permission.
+- `configure_subagent_models` is the preferred model-facing write path. It is limited to this plugin's Loader entry, validates the same schema as the UI, writes the profile's `cordis.patch.yml` through the DSH Settings service, and needs no filesystem permission.
 - Never call its `update` action without a direct user request and explicit confirmation of the complete replacement list.
 - Prefer the settings UI when guiding a human through manual configuration.
-- Do not add settings to `cordis.patch.yml`; the Cordis patch only mounts the plugin.
-- Direct `settings.yaml` editing is a fallback only when the configuration tool is unavailable. Preserve unrelated namespaces and use normal approval escalation if the file is outside the workspace.
+- Never edit the plugin package's own `cordis.patch.yml`; it only mounts the plugin.
+- Direct editing of a home or profile `cordis.patch.yml` is a fallback only when the configuration tool is unavailable or refused. Change only the `- id: dsh-subagent-model-router` entry, keep every other entry, remember that its `config:` replaces the whole configuration, and use normal approval escalation if the file is outside the workspace.

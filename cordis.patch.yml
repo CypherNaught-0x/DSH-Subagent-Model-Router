@@ -1,4 +1,4 @@
-# Mount only; user configuration lives in settings.yaml.
+# Mount only; configure the entry's `config:` in a home or profile Cordis patch.
 - insert:
     - id: dsh-subagent-model-router
       name: dsh-subagent-model-router

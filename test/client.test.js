@@ -121,8 +121,7 @@ test('client bundle registers a dedicated settings section', async () => {
     connection: { api: {}, isLoopback: true },
     remote: { $on: () => () => {} },
     sessions: {
-      openSubagent() {},
-      setSubagentCatalogOpen() {},
+      refreshProjections: async () => {},
     },
   }
   const ctx = {
@@ -150,22 +149,19 @@ test('client bundle registers a dedicated settings section', async () => {
     order: -10,
     priority: -1,
   }, {
-    name: 'conversation.session.header.actions',
-    id: 'subagent-catalog',
-    order: 10,
-    priority: -1,
-    locale: 'subagent',
-  }, {
     name: 'settings.section',
     id: 'subagent-model-router',
     order: 25,
     label: 'Subagent Models',
   }])
   assert.equal(sidebarDecorationRegistrations, 0)
-  const registration = registrations[2]
+  assert.equal(registrations.some((entry) => entry.options.id === 'subagent-catalog'), false)
+  const registration = registrations[1]
   const rendered = registration.component()
   assert.equal(rendered.type, 'section')
   assert.equal(rendered.children[0].children[0], 'Subagent Models')
+  assert.match(JSON.stringify(rendered.children[1]), /- id: dsh-subagent-model-router/)
+  assert.match(JSON.stringify(rendered.children[1]), /home patch or --patch overlay/)
   assert.equal(rendered.children[4].children[0].children[0], 'Models')
 
   for (const dispose of injectionDisposers.reverse()) dispose()
@@ -306,41 +302,32 @@ test('native header chip resolves the configured friendly model name', async () 
     assert.equal(chip.props['aria-label'], 'Acme Reasoner (acme/reasoner)')
     assert.equal(chip.children[0].children[0], 'Acme Reasoner')
 
-    const catalog = expandFunctionComponents(plugin.SubagentCatalogAction({
-      sessionId: 'parent',
-      useSessions: (selector) => selector({
-        subagentsByParent: {
-          parent: {
-            state: 'ready',
-            error: null,
-            parentAvailable: true,
-            entries: [{
-              kind: 'child',
-              id: 'child',
-              label: 'Review',
-              mode: 'continuable',
-              activity: 'running',
-              hasChildren: false,
-            }],
-          },
-        },
-        byId: {
-          child: {
-            id: 'child',
-            origin: 'subagent',
-            parentId: 'parent',
-            running: true,
-            projectionValues: {
-              subagentModelRoute: { provider: 'acme', model: 'reasoner' },
-            },
-          },
-        },
-      }),
-      sessions: {
-        openSubagent() {},
-        refreshSubagents() {},
-        setSubagentCatalogOpen() {},
+    const catalog = expandFunctionComponents(plugin.CatalogRows({
+      parentSessionId: 'parent',
+      catalog: {
+        state: 'ready',
+        error: null,
+        entries: [{ id: 'child', label: 'Review', mode: 'continuable', activity: 'running', createdAt: 1 }],
       },
+      catalogs: {},
+      summaries: {
+        child: {
+          id: 'child',
+          origin: 'subagent',
+          parentId: 'parent',
+          running: true,
+          projectionValues: {
+            subagentModelRoute: { provider: 'acme', model: 'reasoner' },
+          },
+        },
+      },
+      configuredModels: [{ alias: 'deep', provider: 'acme', model: 'reasoner', displayName: 'Acme Reasoner' }],
+      expanded: new Set(),
+      level: 1,
+      now: 0,
+      openChild() {},
+      refreshProjection() {},
+      toggleBranch() {},
       t: (key) => key,
     }))
     const row = findNode(catalog, (node) => node.props?.role === 'treeitem')
@@ -370,45 +357,50 @@ test('model identity prefers the configured display name and preserves the full 
   })
 })
 
-test('catalog rows render the active model as an accessible chip', async () => {
-  const { plugin } = await loadClient({ stateValues: [true, new Set()] })
-  const route = { provider: 'acme', model: 'reasoner' }
-  const state = {
-    subagentsByParent: {
+function projectionSnapshot(extra = {}) {
+  return {
+    ids: ['parent'],
+    phase: 'ready',
+    projectionsBySession: {
       parent: {
-        state: 'ready',
+        state: 'idle',
         error: null,
-        parentAvailable: true,
-        entries: [{
-          kind: 'child',
-          id: 'child',
-          label: 'Review',
-          mode: 'continuable',
-          activity: 'running',
-          hasChildren: false,
-        }],
+        values: {
+          subagentCatalog: [{ id: 'child', label: 'Review', mode: 'continuable', createdAt: 1 }],
+        },
       },
     },
     byId: {
+      parent: { id: 'parent', origin: 'user' },
       child: {
         id: 'child',
         origin: 'subagent',
         parentId: 'parent',
         running: true,
         title: 'Review architecture',
-        projectionValues: { subagentModelRoute: route },
+        projectionValues: { subagentModelRoute: { provider: 'acme', model: 'reasoner' }, subagentTiming: { settledMs: 65000 } },
       },
     },
+    ...extra,
   }
-  const tree = expandFunctionComponents(plugin.SubagentCatalogAction({
-    sessionId: 'parent',
-    useSessions: (selector) => selector(state),
-    sessions: {
-      openSubagent() {},
-      refreshSubagents() {},
-      setSubagentCatalogOpen() {},
+}
+
+function sessionsService(snapshot, calls = []) {
+  return {
+    list: { getSnapshot: () => snapshot, subscribe: () => () => {} },
+    refreshProjections(id) {
+      calls.push(['refresh', id])
+      return Promise.resolve()
     },
-    t: (key) => key,
+  }
+}
+
+test('catalog rows render the active model as an accessible chip', async () => {
+  const { plugin } = await loadClient({ stateValues: [new Set(), 0] })
+  const tree = expandFunctionComponents(plugin.BetterSidebarSubagentTab({
+    ctx: { get: (name) => name === 'sessions' ? sessionsService(projectionSnapshot()) : undefined },
+    scope: { sessionId: 'parent' },
+    visible: true,
   }))
 
   const chip = findNode(tree, (node) => node.props?.title === 'acme/reasoner')
@@ -419,27 +411,35 @@ test('catalog rows render the active model as an accessible chip', async () => {
   assert.match(row.props['aria-label'], /acme\/reasoner/)
   const runningDot = findNode(row, (node) => node.props?.className === 'dsh-smr-catalog-dot-running')
   assert.equal(runningDot.props.role, 'img')
-  assert.equal(runningDot.props['aria-label'], 'activity.running')
+  assert.equal(runningDot.props['aria-label'], 'running')
   const meta = findNode(row, (node) => node.props?.style?.flexDirection === 'column' && node.props?.style?.alignItems === 'flex-end')
   assert.ok(meta)
   assert.equal(meta.children[0].props.title, 'acme/reasoner')
 })
 
+test('catalogs derive from DSH 0.1.7 subagentCatalog projections', async () => {
+  const { plugin } = await loadClient()
+  const catalogs = plugin.catalogsFromSnapshot(projectionSnapshot({
+    projectionsBySession: {
+      parent: projectionSnapshot().projectionsBySession.parent,
+      child: { state: 'idle', error: null, values: {} },
+      broken: { state: 'error', error: { message: 'offline' }, values: {} },
+    },
+  }))
+  assert.deepEqual(catalogs.parent, {
+    state: 'ready',
+    error: null,
+    entries: [{ id: 'child', label: 'Review', mode: 'continuable', createdAt: 1, activity: 'running' }],
+  })
+  assert.equal(catalogs.child.state, 'loading')
+  assert.equal(catalogs.broken.state, 'error')
+  assert.equal(catalogs.broken.error.message, 'offline')
+})
+
 test('Better Sidebar tab renders authoritative nested catalog rows without DOM scraping', async () => {
   const { plugin } = await loadClient()
-  const state = {
-    current: 'parent',
-    subagentsByParent: {
-      parent: { state: 'ready', error: null, parentAvailable: true, entries: [{ kind: 'child', id: 'child', label: 'Review', mode: 'continuable', activity: 'running', hasChildren: false }] },
-    },
-    byId: {
-      parent: { id: 'parent', origin: 'user' },
-      child: { id: 'child', origin: 'subagent', parentId: 'parent', running: true, projectionValues: { subagentModelRoute: { provider: 'acme', model: 'reasoner' }, subagentTiming: { settledMs: 65000 } } },
-    },
-  }
-  const calls = []
   const tree = expandFunctionComponents(plugin.BetterSidebarSubagentTab({
-    ctx: { get: (name) => name === 'sessions' ? { list: { getSnapshot: () => state, subscribe: () => () => {} }, setSubagentCatalogOpen: (...args) => calls.push(args) } : undefined },
+    ctx: { get: (name) => name === 'sessions' ? sessionsService(projectionSnapshot()) : undefined },
     scope: { sessionId: 'parent' }, visible: true,
   }))
   const row = findNode(tree, (node) => node.props?.role === 'treeitem')
@@ -452,58 +452,27 @@ test('Better Sidebar tab renders authoritative nested catalog rows without DOM s
   assert.match(motionStyles.props.dangerouslySetInnerHTML.__html, /dsh-smr-catalog-dot-running/)
 })
 
-test('catalog unmount closes every expanded descendant with the service receiver intact', async () => {
-  const { plugin, effectCleanups } = await loadClient({
-    runEffects: true,
-    stateValues: [true, new Set(), 0],
-  })
+test('Better Sidebar tab loads catalogs through refreshProjections and opens children through the workspace', async () => {
+  const { plugin, effectCleanups } = await loadClient({ runEffects: true, stateValues: [new Set(), 0] })
   const calls = []
-  const sessions = {
-    openSubagent() {},
-    refreshSubagents() {},
-    setSubagentCatalogOpen(id, open) {
-      assert.equal(this, sessions)
-      calls.push([id, open])
-    },
-  }
-  const state = {
-    subagentsByParent: {
-      parent: {
-        state: 'ready',
-        error: null,
-        parentAvailable: true,
-        entries: [{
-          kind: 'child',
-          id: 'child',
-          label: 'Review',
-          mode: 'continuable',
-          activity: 'inactive',
-          hasChildren: true,
-        }],
-      },
-    },
-    byId: {
-      child: {
-        id: 'child',
-        origin: 'subagent',
-        parentId: 'parent',
-        running: false,
-        title: 'Review architecture',
-        projectionValues: {},
-      },
-    },
-  }
-  const tree = expandFunctionComponents(plugin.SubagentCatalogAction({
-    sessionId: 'parent',
-    useSessions: (selector) => selector(state),
-    sessions,
-    t: (key) => key,
+  const opened = []
+  const tree = expandFunctionComponents(plugin.BetterSidebarSubagentTab({
+    ctx: { get: (name) => name === 'sessions' ? sessionsService(projectionSnapshot(), calls) : undefined },
+    scope: { sessionId: 'parent' },
+    visible: true,
+    openChild: (address) => opened.push(address),
   }))
-  const disclosure = findNode(tree, (node) => node.props?.['aria-label'] === 'branch.expand')
-  disclosure.props.onClick({ preventDefault() {}, stopPropagation() {} })
-  for (const cleanup of effectCleanups.reverse()) cleanup()
+  assert.deepEqual(calls, [['refresh', 'parent']])
 
-  assert.deepEqual(calls, [['child', true], ['child', false]])
+  const disclosure = findNode(tree, (node) => node.props?.['aria-label'] === 'Expand Review')
+  disclosure.props.onClick({ preventDefault() {}, stopPropagation() {} })
+  assert.deepEqual(calls, [['refresh', 'parent'], ['refresh', 'child']])
+
+  const row = findNode(tree, (node) => node.props?.role === 'treeitem')
+  row.props.onClick()
+  assert.deepEqual(opened, [{ parentSessionId: 'parent', childSessionId: 'child', mode: 'continuable' }])
+  // A running child starts the one-second duration timer; clear it.
+  for (const cleanup of effectCleanups.reverse()) cleanup()
 })
 
 test('client uses the plugin endpoint instead of the rc.6 allowlisted settings API', async () => {
@@ -514,11 +483,59 @@ test('client uses the plugin endpoint instead of the rc.6 allowlisted settings A
   assert.doesNotMatch(source, /api\.settings\.describe/)
   assert.doesNotMatch(source, /api\.settings\.update/)
   assert.doesNotMatch(source, /connection\.isLoopback/)
+  assert.doesNotMatch(source, /subagentsByParent|setSubagentCatalogOpen|openSubagent|refreshSubagents/)
+  assert.doesNotMatch(source, /id: 'subagent-catalog'/)
+})
+
+test('settings updates are matched against the entry id reported by the Host route', async () => {
+  const originalFetch = globalThis.fetch
+  let requests = 0
+  globalThis.fetch = async () => {
+    requests += 1
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { namespace: 'router-copy', writable: true, descriptor: { value: { models: [] }, revision: 0 } }
+      },
+    }
+  }
+  const effects = []
+  let onDocumentUpdated
+  try {
+    const { plugin } = await loadClient()
+    const services = {
+      connection: {},
+      remote: { $on: (_event, listener) => { onDocumentUpdated = listener; return () => {} } },
+      sessions: {},
+      slots: { inject: (_name, callback) => callback(), register: () => () => {} },
+    }
+    const ctx = {
+      get: (name) => services[name],
+      on: () => () => {},
+      effect: (callback) => { const dispose = callback(); effects.push(dispose); return dispose },
+      inject: () => ({ dispose() {} }),
+    }
+    plugin.apply(ctx)
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(requests, 1)
+    onDocumentUpdated('dsh-subagent-model-router')
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(requests, 1)
+    onDocumentUpdated('router-copy')
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(requests, 2)
+  } finally {
+    for (const dispose of effects.reverse()) dispose()
+    globalThis.fetch = originalFetch
+  }
 })
 
 test('package manifest publishes and injects the client bundle', async () => {
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
-  assert.equal(manifest.version, '0.8.0')
+  assert.equal(manifest.version, '0.9.0')
+  assert.equal(manifest.dependencies['@deepseek-ai/schemastery'], undefined)
+  assert.equal(manifest.peerDependencies['@deepseek-ai/schemastery'], '^3.18.4')
   assert.equal(manifest.exports['./client'], './lib/client.js')
   assert.equal(manifest.dsh.client.platform, 'web')
   assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-settings'))

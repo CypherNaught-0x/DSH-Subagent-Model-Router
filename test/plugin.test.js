@@ -6,6 +6,7 @@ import {
   inject,
   CATALOG_TOOL_NAME,
   CONFIG_TOOL_NAME,
+  Config,
   SETTINGS_NAMESPACE,
   WAIT_TOOL_NAME,
   subagentModelRouteProjectionDefinition,
@@ -77,12 +78,18 @@ function createContext(options = {}) {
   const effects = []
   const projectionDefinitions = []
   const settingsReplacements = []
+  const settingsPresentations = []
+  const entryId = options.entryId ?? SETTINGS_NAMESPACE
   let disposed = false
-  let settingsValue = options.settings ?? configuredSettings
+  // DSH resolves the entry config through the plugin's volatile Config schema;
+  // the test keeps one resolved generation and exposes live references to it.
+  let resolvedSettings = Config(options.settings ?? configuredSettings)
   let settingsRevision = 0
-  let settingsWatcher
-  let settingsRegistration
   let webRoute
+  const config = Object.fromEntries(Object.keys(resolvedSettings).map((field) => [field, {
+    get: () => resolvedSettings[field].get(),
+  }]))
+  const plainSettings = () => Object.fromEntries(Object.entries(resolvedSettings).map(([field, ref]) => [field, ref.get()]))
 
   const provider = options.provider ?? {
     name: 'spawn',
@@ -96,23 +103,42 @@ function createContext(options = {}) {
     prepareContinuable() {},
   }
 
-  const commitSettings = async (next, expectedRevision) => {
-    if (expectedRevision !== undefined && expectedRevision !== settingsRevision) {
-      const error = new Error(`settings conflict: expected ${expectedRevision}, actual ${settingsRevision}`)
-      error.name = 'SettingsConflictError'
-      throw error
-    }
-    settingsRegistration.options.validate(next)
-    const previous = settingsValue
-    settingsValue = next
+  const commitVolatile = (next) => {
+    resolvedSettings = Config(next)
     settingsRevision += 1
-    settingsReplacements.push(next)
-    if (settingsWatcher !== undefined) settingsWatcher(next, previous)
+    listeners.get('loader/volatile-update')?.([['models']])
+  }
+
+  const settingsService = options.withoutSettings === true ? undefined : {
+    writable: true,
+    configure(presentation, owner) {
+      settingsPresentations.push({ presentation, owner })
+      return () => {}
+    },
+    describe(describeOptions) {
+      assert.equal(describeOptions?.redactSecrets, true)
+      return [{ ns: entryId, value: plainSettings(), revision: settingsRevision, applies: 'live' }]
+    },
+    async replace(namespace, next, expectedRevision) {
+      assert.equal(namespace, entryId)
+      if (options.overriddenByHomePatch === true) {
+        throw new Error(`Configuration for "${namespace}" is overridden by a home patch or command-line overlay`)
+      }
+      if (expectedRevision !== undefined && expectedRevision !== settingsRevision) {
+        const error = new Error(`settings conflict: expected ${expectedRevision}, actual ${settingsRevision}`)
+        error.name = 'SettingsConflictError'
+        throw error
+      }
+      settingsReplacements.push(next)
+      commitVolatile(next)
+    },
   }
 
   const ctx = {
+    fiber: { entry: { options: { id: entryId } } },
     get(name) {
       if (name === 'agents') return options.agents
+      if (name === 'settings') return settingsService
       if (name !== 'webServer' || options.withWebServer !== true) return undefined
       return {
         register(route) {
@@ -177,39 +203,6 @@ function createContext(options = {}) {
         }
       },
     },
-    settings: {
-      writable: true,
-      describe() {
-        if (settingsRegistration === undefined) return []
-        return [{
-          ns: settingsRegistration.namespace,
-          value: settingsValue,
-          revision: settingsRevision,
-        }]
-      },
-      async replace(namespace, next, expectedRevision) {
-        assert.equal(namespace, SETTINGS_NAMESPACE)
-        await commitSettings(next, expectedRevision)
-      },
-      register(namespace, schema, registrationOptions) {
-        settingsRegistration = { namespace, schema, options: registrationOptions }
-        registrationOptions.validate(settingsValue)
-        return {
-          get() {
-            return settingsValue
-          },
-          async replace(next) {
-            await commitSettings(next)
-          },
-          watch(callback) {
-            settingsWatcher = callback
-            return () => {
-              settingsWatcher = undefined
-            }
-          },
-        }
-      },
-    },
     systemPrompt: {
       section(section) {
         sections.push(section)
@@ -257,10 +250,19 @@ function createContext(options = {}) {
       effects.push(dispose)
       return typeof dispose === 'function' ? dispose : () => {}
     },
+    inject(dependencies, callback) {
+      if (dependencies.some((dependency) => ctx.get(dependency) === undefined)) return () => {}
+      callback({
+        ...ctx,
+        ...Object.fromEntries(dependencies.map((dependency) => [dependency, ctx.get(dependency)])),
+      })
+      return () => {}
+    },
   }
 
   return {
     ctx,
+    config,
     continuableStarts,
     effects,
     disposeEffects() {
@@ -287,17 +289,13 @@ function createContext(options = {}) {
     projectionDefinitions,
     registeredTools,
     sections,
-    settingsRegistration: () => settingsRegistration,
+    settingsPresentations,
     settingsReplacements,
     skills,
     starts,
     webRoute: () => webRoute,
     updateSettings(next) {
-      settingsRegistration.options.validate(next)
-      const previous = settingsValue
-      settingsValue = next
-      settingsRevision += 1
-      if (settingsWatcher !== undefined) settingsWatcher(next, previous)
+      commitVolatile(next)
     },
   }
 }
@@ -354,10 +352,11 @@ function execution(options = {}) {
 test('registers settings, setup skill, catalog, and configured model tool', async () => {
   assert.ok(inject.includes('agents'))
   const state = createContext()
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
 
-  assert.equal(state.settingsRegistration().namespace, SETTINGS_NAMESPACE)
-  assert.equal(state.settingsRegistration().options.applies, 'live')
+  assert.ok(!inject.includes('settings'))
+  assert.equal(SETTINGS_NAMESPACE, 'dsh-subagent-model-router')
+  assert.deepEqual(state.settingsPresentations, [{ presentation: { auto: false }, owner: state.ctx.fiber }])
   assert.deepEqual(state.projectionDefinitions, [subagentModelRouteProjectionDefinition])
   assert.equal(state.skills.length, 1)
   assert.equal(state.skills[0].name, 'model-subagent-setup')
@@ -399,7 +398,7 @@ test('registers settings, setup skill, catalog, and configured model tool', asyn
 
 test('rejects a self-directed send_message before the underlying tool runs', async () => {
   const state = createContext()
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const caller = {
     id: 'resident-child',
     options: {},
@@ -423,7 +422,7 @@ test('rejects a self-directed send_message before the underlying tool runs', asy
 
 test('does not block send_message delivery to a resident child direct parent', async () => {
   const state = createContext()
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const caller = {
     id: 'resident-child',
     options: {},
@@ -459,7 +458,7 @@ test('filters stale subagents from list_agents without removing direct addressin
     settings: { ...defaultSettings, listingInactivityTurns: 2 },
     agents: { get: (id) => id === parent.id ? parent : children.get(id) },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const listTool = {
     name: 'list_agents',
     output: {
@@ -514,7 +513,7 @@ test('session disposal retires listing activity for both child and parent ids', 
     settings: { ...defaultSettings, listingInactivityTurns: 1 },
     agents: { get: (id) => id === parent.id ? parent : undefined },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   state.registeredTools.set('list_agents', {
     name: 'list_agents',
     output: { render: () => [] },
@@ -546,7 +545,7 @@ test('session disposal retires listing activity for both child and parent ids', 
 
 test('listing inactivity filtering defaults to twenty turns and zero disables it', async () => {
   const state = createContext({ settings: defaultSettings })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const configuration = state.registeredTools.get(CONFIG_TOOL_NAME)
   const current = await configuration.execute({ action: 'get' }, execution())
   assert.equal(current.settings.listingInactivityTurns, 20)
@@ -562,7 +561,7 @@ test('listing inactivity filtering defaults to twenty turns and zero disables it
 
 test('routes foreground work through the selected settings model', async () => {
   const state = createContext()
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const delegation = state.registeredTools.get('subagent_model')
 
   const result = await delegation.execute({
@@ -588,7 +587,7 @@ test('routes foreground work through the selected settings model', async () => {
 
 test('starts a durable background child by default', async () => {
   const state = createContext()
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const delegation = state.registeredTools.get('subagent_model')
 
   const result = await delegation.execute({
@@ -639,7 +638,7 @@ test('tracks and settles a model-routed child through current Session snapshots'
       return { childId: child.id, messageId: 'message-snapshot' }
     },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const delegation = state.registeredTools.get('subagent_model')
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
 
@@ -674,7 +673,7 @@ test('tracks and settles a model-routed child through current Session snapshots'
 
 test('waits for model-routed background children and returns their results', async () => {
   const state = createContext()
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const delegation = state.registeredTools.get('subagent_model')
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
 
@@ -747,7 +746,7 @@ test('watchdog recovers the observed completion chronology while the exact child
       return { childId: child.id, messageId: 'message-watchdog' }
     },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const delegation = state.registeredTools.get('subagent_model')
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
 
@@ -855,7 +854,7 @@ test('settlement notice immediately recovers a discovered child when subagent/en
       list: () => [parentExec.agent, child],
     },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
 
   let finished = false
@@ -935,7 +934,7 @@ test('watchdog recovers a discovered child when both terminal lifecycle events w
       list: () => [child],
     },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   const waiting = wait.execute({}, parentExec)
   await Promise.resolve()
@@ -1010,7 +1009,7 @@ test('auto_agent_run missed end reconciles without joining stale idle children',
       list: () => [stale, ...(children.has(child.id) ? [child] : [])],
     },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   let release
   const dispatch = state.runToolExecution({
@@ -1101,7 +1100,7 @@ test('pre-boundary completion evidence cannot settle a newly discovered activati
     settings: defaultSettings,
     agents: { get: () => child, list: () => [child] },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   let finished = false
   const waiting = wait.execute({}, parentExec).then((value) => {
@@ -1159,7 +1158,7 @@ test('reload discovery recovers when the observed running child already logged i
       list: () => [child],
     },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   const waiting = wait.execute({}, { ...parentExec, signal: AbortSignal.timeout(250) })
   await Promise.resolve()
@@ -1207,7 +1206,7 @@ test('settlement notice immediately reconciles a child first published without a
     settings: defaultSettings,
     agents: { get: (id) => children.get(id), list: () => [...children.values()] },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   await state.runToolExecution({
     name: 'subagent',
     arguments: { description: 'Late readable child' },
@@ -1286,7 +1285,7 @@ test('reload reconciliation uses the latest turn from a repeated-turn resident A
     settings: defaultSettings,
     agents: { get: () => child, list: () => [child] },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   let finished = false
   const waiting = wait.execute({}, { ...parentExec, signal: AbortSignal.timeout(500) }).then((value) => {
@@ -1361,7 +1360,7 @@ test('malformed recovery history for one child does not starve an independent ch
     settings: defaultSettings,
     agents: { get: (id) => children.get(id), list: () => [...children.values()] },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   const waiting = wait.execute({}, { ...parentExec, signal: AbortSignal.timeout(500) })
   await Promise.resolve()
@@ -1437,7 +1436,7 @@ test('settlement notice reconciliation remains isolated between independent pare
       list: () => [left.agent, right.agent],
     },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   let rightFinished = false
   const leftWaiting = wait.execute({}, { ...leftParent.exec, signal: AbortSignal.timeout(500) })
@@ -1505,7 +1504,7 @@ test('waits for standard background children when no model routes are configured
       },
     },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   assert.equal(state.registeredTools.has('subagent_model'), false)
 
@@ -1543,7 +1542,7 @@ test('does not report empty while standard, fork, or project-agent delegation ca
   for (const [index, name] of ['subagent', 'subagent_fork', 'auto_agent_run'].entries()) {
     const parentExec = execution({ agentId: `in-flight-${index}` })
     const state = createContext({ settings: defaultSettings })
-    await apply(state.ctx)
+    await apply(state.ctx, state.config)
     const wait = state.registeredTools.get(WAIT_TOOL_NAME)
     let release
     const body = new Promise((resolve) => { release = resolve })
@@ -1593,7 +1592,7 @@ test('wait includes an in-flight background start before its descriptor lookup i
       list: () => [...children.values()],
     },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   let release
   const body = new Promise((resolve) => { release = resolve })
@@ -1665,7 +1664,7 @@ test('plugin reload reports an interrupted idle child with parked input and pres
       list: () => [child],
     },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
 
   const paused = await wait.execute({}, { ...parentExec, signal: AbortSignal.timeout(500) })
@@ -1713,7 +1712,7 @@ test('an active wait reports a child that becomes idle with parked input', async
     settings: defaultSettings,
     agents: { get: () => child, list: () => [child] },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   const waiting = wait.execute({}, parentExec)
   await new Promise((resolve) => setImmediate(resolve))
@@ -1766,7 +1765,7 @@ test('an already-aborted wait rejects instead of returning an initial paused out
     settings: defaultSettings,
     agents: { get: () => child, list: () => [child] },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   const controller = new AbortController()
   controller.abort(new Error('cancel paused wait'))
@@ -1812,7 +1811,7 @@ test('parked detection excludes running, no-pending, and cleanly completed idle 
       list: () => children,
     },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   const controller = new AbortController()
   const waiting = wait.execute({}, execution({ agent: parentExec.agent, signal: controller.signal }))
@@ -1854,7 +1853,7 @@ test('plugin reload discovers a genuinely running continuable child', async () =
       list: () => [parentExec.agent, child],
     },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
 
   let finished = false
@@ -1910,7 +1909,7 @@ test('plugin reload ignores an idle completed continuable child', async () => {
       list: () => [parentExec.agent, child],
     },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 100)
@@ -1923,7 +1922,7 @@ test('plugin reload ignores an idle completed continuable child', async () => {
 
 test('a truly empty wait still returns immediately', async () => {
   const state = createContext({ settings: defaultSettings })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   assert.deepEqual(await wait.execute({}, execution({ agentId: 'empty-parent' })), [])
 })
@@ -1939,7 +1938,7 @@ test('captures a child that settles before background start returns', async () =
       return { childId: 'child-early', messageId: 'message-early' }
     },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const delegation = state.registeredTools.get('subagent_model')
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
 
@@ -1967,7 +1966,7 @@ test('does not retain an unrelated ambiguous start emitted during router activat
       return { childId: 'child-router', messageId: 'message-router' }
     },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const delegation = state.registeredTools.get('subagent_model')
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
 
@@ -2017,7 +2016,7 @@ test('promotes a provisional record when subagent/start arrives after startConti
       return { childId: 'child-delayed', messageId: 'message-delayed' }
     },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const delegation = state.registeredTools.get('subagent_model')
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
 
@@ -2066,7 +2065,7 @@ test('binds a missed start from the exact end event and ignores a later duplicat
       return { childId: 'child-missed', messageId: 'message-missed' }
     },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const delegation = state.registeredTools.get('subagent_model')
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
 
@@ -2122,7 +2121,7 @@ test('binds a missed start from the exact end event and ignores a later duplicat
 
 test('preserves non-text child output in wait results', async () => {
   const state = createContext()
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const delegation = state.registeredTools.get('subagent_model')
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   const output = [
@@ -2155,7 +2154,7 @@ test('preserves non-text child output in wait results', async () => {
 
 test('cancelled waits retain child results for a retry', async () => {
   const state = createContext()
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const delegation = state.registeredTools.get('subagent_model')
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   await delegation.execute({
@@ -2192,7 +2191,7 @@ test('cancelled waits retain child results for a retry', async () => {
 test('direct human steering interrupts an active wait and preserves the exact run for resumption', async () => {
   const parentExec = execution({ agentId: 'steered-parent' })
   const state = createContext()
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const delegation = state.registeredTools.get('subagent_model')
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   await delegation.execute({
@@ -2237,7 +2236,7 @@ test('direct human steering interrupts an active wait and preserves the exact ru
 test('steering and completion races retain the terminal result for the next wait', async () => {
   const parentExec = execution({ agentId: 'racing-parent' })
   const state = createContext()
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const delegation = state.registeredTools.get('subagent_model')
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   await delegation.execute({
@@ -2272,7 +2271,7 @@ test('steering and completion races retain the terminal result for the next wait
 test('wait ignores non-direct steering and stale run completions', async () => {
   const parentExec = execution({ agentId: 'filtered-parent' })
   const state = createContext()
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const delegation = state.registeredTools.get('subagent_model')
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   await delegation.execute({
@@ -2385,7 +2384,7 @@ test('recovery matches the continuation terminal-reason matrix and withholds tea
       settings: defaultSettings,
       agents: { get: () => child, list: () => [child] },
     })
-    await apply(state.ctx)
+    await apply(state.ctx, state.config)
     const wait = state.registeredTools.get(WAIT_TOOL_NAME)
     const waiting = wait.execute({}, { ...parentExec, signal: AbortSignal.timeout(500) })
     await Promise.resolve()
@@ -2440,7 +2439,7 @@ test('matching settlement proof fails closed when the retained child is permanen
     settings: defaultSettings,
     agents: { get: () => undefined, list: () => [] },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   await state.runToolExecution({
     name: 'subagent',
     arguments: { description: 'Missing child' },
@@ -2473,7 +2472,7 @@ test('a failed record does not consume a healthy sibling result needed by retry'
     settings: defaultSettings,
     agents: { get: () => undefined, list: () => [] },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   for (const childId of ['mixed-healthy-child', 'mixed-missing-child']) {
     await state.runToolExecution({
       name: 'subagent',
@@ -2530,7 +2529,7 @@ test('matching settlement proof fails closed when retained activation history is
     settings: defaultSettings,
     agents: { get: () => child, list: () => [child] },
   })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   const waiting = wait.execute({}, parentExec)
   await new Promise((resolve) => setImmediate(resolve))
@@ -2565,7 +2564,7 @@ test('tracker Fiber teardown rejects active waits idempotently and clears watchd
 
   const parentExec = execution({ agentId: 'tracker-disposal-parent' })
   const state = createContext()
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const delegation = state.registeredTools.get('subagent_model')
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   await delegation.execute({
@@ -2585,7 +2584,7 @@ test('tracker Fiber teardown rejects active waits idempotently and clears watchd
 
   const racingParent = execution({ agentId: 'tracker-disposal-settlement-race-parent' })
   const racingState = createContext()
-  await apply(racingState.ctx)
+  await apply(racingState.ctx, racingState.config)
   const racingDelegation = racingState.registeredTools.get('subagent_model')
   const racingWait = racingState.registeredTools.get(WAIT_TOOL_NAME)
   await racingDelegation.execute({
@@ -2607,7 +2606,7 @@ test('tracker Fiber teardown rejects active waits idempotently and clears watchd
 
 test('parent disposal releases tracked children and active waits', async () => {
   const state = createContext()
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const delegation = state.registeredTools.get('subagent_model')
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   await delegation.execute({
@@ -2629,7 +2628,7 @@ test('parent disposal releases tracked children and active waits', async () => {
 
 test('disposing an old same-id agent does not clear replacement tracking', async () => {
   const state = createContext()
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const delegation = state.registeredTools.get('subagent_model')
   const wait = state.registeredTools.get(WAIT_TOOL_NAME)
   const oldAgent = { id: 'reused-parent', options: {} }
@@ -2664,7 +2663,7 @@ test('disposing an old same-id agent does not clear replacement tracking', async
 test('existing wait tool suppresses router tracking and guidance', async () => {
   const existingWaitTool = { name: WAIT_TOOL_NAME, description: 'existing wait implementation' }
   const state = createContext({ existingWaitTool })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
 
   assert.equal(state.registeredTools.get(WAIT_TOOL_NAME), existingWaitTool)
   assert.equal(state.listeners.has('subagent/end'), false)
@@ -2685,7 +2684,7 @@ test('scoped wait shadow suppresses tracking for that parent', async () => {
   const parent = { id: 'scoped-parent', options: {} }
   const scopedWait = { name: WAIT_TOOL_NAME, description: 'scoped wait implementation' }
   const state = createContext({ scopedWaitTool: { agent: parent, tool: scopedWait } })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const routerWait = state.registeredTools.get(WAIT_TOOL_NAME)
   const delegation = state.registeredTools.get('subagent_model')
 
@@ -2702,7 +2701,7 @@ test('scoped wait shadow suppresses tracking for that parent', async () => {
 
 test('Web settings route is loopback-only and persists validated revisions', async () => {
   const state = createContext({ withWebServer: true })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const route = state.webRoute()
   assert.equal(route.kind, 'exact')
   assert.equal(route.path, '/dsh-subagent-model-router/settings')
@@ -2794,7 +2793,7 @@ test('Web settings route is loopback-only and persists validated revisions', asy
 
 test('configuration tool reads and updates only the plugin settings namespace', async () => {
   const state = createContext()
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const configuration = state.registeredTools.get(CONFIG_TOOL_NAME)
 
   const current = await configuration.execute({ action: 'get' }, execution())
@@ -2824,7 +2823,7 @@ test('configuration tool reads and updates only the plugin settings namespace', 
 
 test('configuration tool requires a complete model list for updates', async () => {
   const state = createContext()
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   const configuration = state.registeredTools.get(CONFIG_TOOL_NAME)
   await assert.rejects(
     () => configuration.execute({ action: 'update' }, execution()),
@@ -2835,7 +2834,7 @@ test('configuration tool requires a complete model list for updates', async () =
 
 test('hot settings changes replace and remove the model-facing tool', async () => {
   const state = createContext()
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
   assert.ok(state.registeredTools.get('subagent_model'))
 
   state.updateSettings({
@@ -2901,7 +2900,7 @@ test('projects the adapter-resolved route only after the child descriptor', asyn
 
 test('empty settings keep only bootstrap setup capabilities', async () => {
   const state = createContext({ settings: defaultSettings })
-  await apply(state.ctx)
+  await apply(state.ctx, state.config)
 
   assert.ok(state.registeredTools.get(CATALOG_TOOL_NAME))
   assert.ok(state.registeredTools.get(CONFIG_TOOL_NAME))
@@ -2910,4 +2909,78 @@ test('empty settings keep only bootstrap setup capabilities', async () => {
   assert.equal(state.skills[0].name, 'model-subagent-setup')
   assert.equal(state.sections.length, 1)
   assert.equal(state.sections[0].text({ scope: {} }), '')
+})
+
+test('Config declares every setting volatile so DSH updates it without a remount', () => {
+  for (const field of ['models', 'subagentProvider', 'maxDepth', 'enableRunInBackground', 'listingInactivityTurns']) {
+    assert.equal(Config.dict[field].meta.volatile, true, field)
+  }
+  const resolved = Config({ models: [configuredSettings.models[0]] })
+  assert.equal(resolved.subagentProvider.get(), 'spawn')
+  assert.equal(resolved.maxDepth.get(), 3)
+  assert.equal(resolved.enableRunInBackground.get(), true)
+  assert.equal(resolved.listingInactivityTurns.get(), 20)
+  assert.equal(resolved.models.get()[0].alias, 'deep')
+})
+
+test('settings writes target the Loader entry id the plugin is mounted under', async () => {
+  const state = createContext({ entryId: 'router-copy', withWebServer: true })
+  await apply(state.ctx, state.config)
+  const current = await callWebRoute(state.webRoute())
+  assert.equal(current.body.namespace, 'router-copy')
+  const configuration = state.registeredTools.get(CONFIG_TOOL_NAME)
+  await configuration.execute({ action: 'update', models: [] }, execution())
+  assert.deepEqual(state.settingsReplacements[0].models, [])
+  assert.equal(state.registeredTools.has('subagent_model'), false)
+})
+
+test('a home patch or --patch overlay makes updates fail with the file to edit', async () => {
+  const state = createContext({ overriddenByHomePatch: true, withWebServer: true })
+  await apply(state.ctx, state.config)
+  const configuration = state.registeredTools.get(CONFIG_TOOL_NAME)
+  await assert.rejects(
+    () => configuration.execute({ action: 'update', models: [] }, execution()),
+    (error) => {
+      assert.equal(error.name, 'SettingsOverriddenError')
+      assert.match(error.message, /home patch \(DSH_HOME\/cordis\.patch\.yml\) or a --patch overlay/)
+      assert.match(error.message, /- id: dsh-subagent-model-router/)
+      assert.match(error.cause.message, /overridden by a home patch or command-line overlay/)
+      return true
+    },
+  )
+  const refused = await callWebRoute(state.webRoute(), {
+    method: 'PUT',
+    headers: { host: '127.0.0.1:3080', origin: 'http://127.0.0.1:3080', 'content-type': 'application/json' },
+    body: { section: configuredSettings, expectedRevision: 0 },
+  })
+  assert.equal(refused.status, 409)
+  assert.match(refused.body.error, /home patch/)
+  assert.deepEqual(state.registeredTools.get('subagent_model').parameters.properties.model.enum, ['deep'])
+})
+
+test('without the Settings service the plugin reads its config and refuses writes clearly', async () => {
+  const state = createContext({ withoutSettings: true, withWebServer: true })
+  await apply(state.ctx, state.config)
+  assert.deepEqual(state.settingsPresentations, [])
+  assert.ok(state.registeredTools.get('subagent_model'))
+  const configuration = state.registeredTools.get(CONFIG_TOOL_NAME)
+  const current = await configuration.execute({ action: 'get' }, execution())
+  assert.equal(current.settings.models[0].alias, 'deep')
+  await assert.rejects(
+    () => configuration.execute({ action: 'update', models: [] }, execution()),
+    /Settings service is not loaded in this profile.*Cordis patch/,
+  )
+  const view = await callWebRoute(state.webRoute())
+  assert.equal(view.body.writable, false)
+  assert.equal(view.body.descriptor.value.models[0].alias, 'deep')
+})
+
+test('an invalid hot update keeps the previous routes', async () => {
+  const state = createContext()
+  await apply(state.ctx, state.config)
+  state.updateSettings({
+    ...configuredSettings,
+    models: [configuredSettings.models[0], { ...configuredSettings.models[0] }],
+  })
+  assert.deepEqual(state.registeredTools.get('subagent_model').parameters.properties.model.enum, ['deep'])
 })

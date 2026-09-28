@@ -1,0 +1,27 @@
+# Cordis patch for DSH 0.1.7: put this entry in $DSH_HOME/cordis.patch.yml
+# (every profile) or in one profile's cordis.patch.yml. Keep the other entries
+# of that file. The bundle already mounts the entry, so only its id is named.
+# A patch `config:` replaces the entry's whole config: list every field you set.
+- id: dsh-subagent-model-router
+  config:
+    subagentProvider: spawn
+    maxDepth: 3
+    enableRunInBackground: true
+    # Hide uncontacted subagents from list_agents after this many parent/user turns.
+    # Set to 0 to disable filtering; hidden subagents remain directly addressable.
+    listingInactivityTurns: 20
+    models:
+      - alias: fast
+        provider: acme
+        model: acme-fast
+        displayName: Acme Fast
+        tags: [fast, routine]
+        description: Use for quick, well-scoped tasks where low latency matters.
+      - alias: deep
+        provider: acme
+        model: acme-reasoner
+        displayName: Acme Reasoner
+        tags: [reasoning, review]
+        description: Use for difficult analysis, architecture decisions, and adversarial review.
+        # DSH rc.6 did not restore this cap after a cold continuable resume.
+        maxTokens: 16384
