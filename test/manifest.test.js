@@ -4,15 +4,11 @@ import test from 'node:test'
 
 const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
 
-test('DSH peers retain older compatibility and explicitly list the supported 0.2 releases', () => {
+test('DSH peers retain older compatibility and accept every 0.2 release', () => {
   for (const name of ['@deepseek-ai/dsh-scope', '@deepseek-ai/dsh-tools']) {
     assert.deepEqual(manifest.peerDependencies[name].split(' || '), [
       '^0.1.0-rc.6',
-      '0.2.0-rc.1',
-      '0.2.0-rc.2',
-      '0.2.1',
-      '0.2.1-rc.1',
-      '0.2.1-rc.2',
+      '>=0.2.0-rc.1 <0.3.0-0',
     ])
   }
 })
