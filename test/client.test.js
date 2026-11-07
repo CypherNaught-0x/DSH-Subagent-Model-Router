@@ -629,6 +629,7 @@ test('package manifest publishes and injects the client bundle', async () => {
   assert.equal(manifest.version, '0.8.0')
   assert.equal(manifest.exports['./client'], './lib/client.js')
   assert.equal(manifest.dsh.client.platform, 'web')
+  assert.equal(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-runtime'), false)
   assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-settings'))
   assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-subagent'))
   assert.ok(manifest.dsh.client.inject.includes('@deepseek-ai/dsh-client-connection'))

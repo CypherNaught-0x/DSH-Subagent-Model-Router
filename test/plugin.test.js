@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
+import ToolRuntime from '@deepseek-ai/dsh-tools'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import { scopeTarget } from '@deepseek-ai/dsh-scope'
 import {
   apply,
@@ -558,6 +562,51 @@ test('listing inactivity filtering defaults to twenty turns and zero disables it
   }, execution())
   assert.equal(updated.settings.listingInactivityTurns, 0)
   assert.equal(configuration.parameters.properties.listing_inactivity_turns.type, 'integer')
+})
+
+test('routes through the 0.2 tool and subagent runtimes with describe-only settings', async () => {
+  const runtime = new Context()
+  const prompt = runtime.plugin(SystemPrompt)
+  const tools = runtime.plugin(ToolRuntime)
+  const subagents = runtime.plugin(SubagentRuntime)
+  await new Promise(resolve => setImmediate(resolve))
+  let received
+  let disposed = false
+  const unregister = runtime.subagents.registerProvider({
+    name: 'spawn',
+    capabilities: { agentOptions: true, depthLimit: true },
+    async start(request) {
+      received = request
+      return {
+        id: 'integration-child',
+        result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'runtime result' }] }),
+        async dispose() { disposed = true },
+      }
+    },
+  })
+  const state = createContext()
+  try {
+    state.ctx.tools = runtime.tools
+    state.ctx.subagents = runtime.subagents
+    state.ctx.settings = {
+      describe: () => [{ ns: SETTINGS_NAMESPACE, value: { ...configuredSettings, enableRunInBackground: false }, revision: 0 }],
+    }
+    await apply(state.ctx)
+    const result = await runtime.tools.get('subagent_model').execute({
+      model: 'deep', description: 'Review architecture', prompt: 'Review the design.', run_in_background: false,
+    }, execution())
+    assert.deepEqual(received.agentOptions, { provider: 'acme', model: 'reasoner', maxTokens: 8192 })
+    assert.equal(received.descriptor.mode, 'one-shot')
+    assert.equal(received.maxDepth, 4)
+    assert.equal(result.output[0].text, 'runtime result')
+    assert.equal(disposed, true)
+  } finally {
+    state.disposeEffects()
+    unregister()
+    await subagents.dispose()
+    await tools.dispose()
+    await prompt.dispose()
+  }
 })
 
 test('routes foreground work through the selected settings model', async () => {
